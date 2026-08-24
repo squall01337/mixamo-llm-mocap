@@ -1,5 +1,10 @@
 # The pipeline, operationally
 
+> The upstream Mixamo path documented below remains unchanged. For the
+> experimental native VRM 1.0 adapter, see [VRM.md](VRM.md). The VRM adapter
+> consumes the semantic joint-position stream directly and does not convert a
+> Mixamo Blender action.
+
 How a video becomes a Y Bot clip, stage by stage, with the decision
 rules an operator (human or AI) needs. Everything here was validated on
 the two shipped clips.
@@ -20,6 +25,12 @@ generating plates with AI video):
   the enemy, not rotation.
 
 Save as `plates/<name>/<clip>.mp4` with a short `SOURCE.md`.
+
+Animated GIF plates are accepted as well. The estimator preserves their
+per-frame timing and writes a deterministic cached H.264 working copy under
+`tools/GVHMR/outputs/input_cache/`; the original GIF is never modified. GIFs
+often have coarse timing, so use `--fps <value>` only when the intended source
+rate is known and the embedded durations are wrong.
 
 ## 1. Estimate
 

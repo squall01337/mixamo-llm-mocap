@@ -36,6 +36,7 @@ feet. That stays the lift's job.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -118,6 +119,67 @@ def video_fps(path: Path) -> float:
     fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
     cap.release()
     return float(fps)
+
+
+def prepare_video_input(path: Path, fps_override: float | None = None) -> tuple[Path, float | None]:
+    """Return a PyAV-compatible input, converting animated GIFs when needed.
+
+    GVHMR's preprocessing chain expects a video container readable through
+    ImageIO's PyAV plugin. GIF frames are decoded with Pillow, sampled on a
+    constant clock, and cached as H.264 without changing the source file.
+    Per-frame GIF durations are honored, including variable-duration GIFs.
+
+    The returned FPS is ``None`` for ordinary videos, preserving their
+    existing probe path and behavior.
+    """
+    if path.suffix.lower() != ".gif":
+        return path, None
+
+    from PIL import Image, ImageSequence
+    from hmr4d.utils.video_io_utils import get_writer
+
+    frames: list[np.ndarray] = []
+    durations_ms: list[float] = []
+    with Image.open(path) as gif:
+        default_ms = float(gif.info.get("duration", 100) or 100)
+        for frame in ImageSequence.Iterator(gif):
+            frames.append(np.asarray(frame.convert("RGB"), dtype=np.uint8))
+            durations_ms.append(float(frame.info.get("duration", default_ms) or default_ms))
+
+    if not frames:
+        raise SystemExit(f"GIF has no frames: {path}")
+    shape = frames[0].shape
+    if any(frame.shape != shape for frame in frames):
+        raise SystemExit(f"GIF frames have inconsistent dimensions: {path}")
+
+    durations = np.maximum(np.asarray(durations_ms, dtype=np.float64) / 1000.0, 0.01)
+    fps = float(fps_override) if fps_override is not None else float(
+        np.clip(1.0 / np.median(durations), 1.0, 60.0)
+    )
+    if not np.isfinite(fps) or fps <= 0.0:
+        raise SystemExit(f"GIF FPS must be positive, got {fps}")
+
+    starts = np.concatenate(([0.0], np.cumsum(durations)[:-1]))
+    total = float(durations.sum())
+    sample_times = np.arange(0.0, total, 1.0 / fps)
+    indices = np.searchsorted(starts, sample_times, side="right") - 1
+    indices = np.clip(indices, 0, len(frames) - 1)
+
+    identity = f"{path.resolve()}|{path.stat().st_size}|{path.stat().st_mtime_ns}|{fps:.8f}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    cache_dir = GVHMR_ROOT / "outputs" / "input_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    converted = cache_dir / f"{path.stem}_{digest}.mp4"
+    if not converted.exists():
+        writer = get_writer(converted, fps=fps, crf=17)
+        try:
+            for index in indices:
+                writer.write_frame(frames[int(index)])
+        finally:
+            writer.close()
+    print(f"GIF input: {len(frames)} frames / {total:.3f}s -> "
+          f"{len(indices)} frames at {fps:.3f} fps ({converted})")
+    return converted, fps
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +499,8 @@ def main() -> None:
     if not video.exists():
         raise SystemExit(f"video not found: {video}")
     preflight()
-    fps = args.fps or video_fps(video)
+    video, gif_fps = prepare_video_input(video, args.fps)
+    fps = args.fps or gif_fps or video_fps(video)
 
     res = run_gvhmr(video, args.person)
     pred = res["pred"]
