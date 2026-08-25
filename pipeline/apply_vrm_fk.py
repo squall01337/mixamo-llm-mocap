@@ -198,7 +198,11 @@ def plant_hips(arm, hips_bone: str, foot_bone: str, ground_z: float) -> None:
 
 def flatten_support_foot(arm, foot_bone: str, source_heading: Vector,
                          rest_directions: dict[str, Vector]) -> None:
-    rest = rest_directions[foot_bone]
+    pose_bone = arm.pose.bones[foot_bone]
+    # VRM 1.0 permits toe bones to be omitted. In that case measure_profile()
+    # cannot derive an ankle-to-toe direction, so preserve the foot bone's
+    # authored rest vector just as aim() does.
+    rest = rest_directions.get(foot_bone, pose_bone.bone.vector)
     horizontal_length = math.sqrt(max(0.0, rest.length_squared - rest.z * rest.z))
     heading = Vector((source_heading.x, source_heading.y, 0.0))
     if heading.length < 1e-6:
