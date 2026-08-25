@@ -1,4 +1,71 @@
-# Mixamo LLM Mocap
+# VRM LLM Mocap
+
+> **Fork status:** This project extends
+> [squall01337/mixamo-llm-mocap](https://github.com/squall01337/mixamo-llm-mocap).
+> The upstream Mixamo pipeline and attribution are preserved. This fork is
+> investigating a rig-independent humanoid motion layer, beginning with native
+> VRM 1.0 support.
+
+## Native VRM milestone
+
+This fork has completed its first end-to-end native VRM proof:
+
+```text
+locked-camera video
+        ↓
+GVHMR / SMPL-X motion reconstruction
+        ↓
+semantic human joint motion
+       ↙ ↘
+ Mixamo   VRM 1.0 humanoid
+             ↓
+      Blender animation + MP4
+```
+
+![Native VRM proof of concept](media/showcase_vrm.gif)
+
+*The VRM animation above is driven directly from reconstructed human motion.
+It is not a conversion of a Mixamo animation.*
+
+The experimental VRM path currently includes:
+
+- VRM 1.0 humanoid-role discovery from `VRMC_vrm` metadata rather than guessed
+  node names;
+- automatic measurement of per-character rest pose, scale, anatomical bone
+  directions, hips height and foot geometry;
+- rest-relative, per-segment directional FK retargeting that preserves the
+  VRM character's proportions;
+- exact authored rest-pose holds, VRM-authored hand roll and foot pitch;
+- semantic support-foot grounding and persistent horizontal foot locking; and
+- Blender `.blend`, QA still and H.264 preview output.
+
+Run the reusable adapter with any local VRM 1.0 humanoid:
+
+```powershell
+python pipeline\run_vrm_adapter.py `
+  --spec action_specs\baseline_dance.json `
+  --vrm "assets\vrm\My Avatar.vrm" `
+  --out-dir clips\baseline_dance_vrm
+```
+
+See [docs/VRM.md](docs/VRM.md) for inputs, outputs, compatibility, validation,
+and direct Blender usage.
+
+**Status: experimental adapter.** Two locally supplied VRM 1.0 avatars with
+different proportions have completed the full 240-frame pipeline from the same
+source plate used for the Mixamo baseline. Native VRM feasibility and reusable
+metadata-driven adaptation are demonstrated; broad rig
+compatibility is not yet claimed. Remaining work includes canonicalizing the
+intermediate schema, smoothing contact transitions, improving chest/head and
+hand-twist reconstruction, VRM 0.x compatibility, testing more avatars, and
+validating combat and two-character interaction.
+
+The important architectural distinction is that reconstructed motion branches
+to independent Mixamo and VRM targets. This fork does **not** require the
+`Mixamo animation → VRM conversion` workflow used by many general-purpose VRM
+retargeters.
+
+## Upstream Mixamo pipeline
 
 **Turn any locked-camera video — filmed or AI-generated — into a clean
 FK animation on any Mixamo character. One performer, or two fighting
@@ -9,6 +76,7 @@ scriptable enough that an AI agent can run the whole loop.**
 ![blender](https://img.shields.io/badge/Blender-5.1%2B-orange)
 ![gpu](https://img.shields.io/badge/CUDA-~8GB%20VRAM-76b900)
 ![agent](https://img.shields.io/badge/operable%20by-AI%20agents-blueviolet)
+![VRM](https://img.shields.io/badge/VRM%201.0-experimental-7b5cff)
 
 ![showcase](media/showcase.gif)
 
@@ -127,6 +195,13 @@ airborne beats), when fists close, where the clip locks back to rest.
    tools\GVHMR\.venv\Scripts\python.exe pipeline\qa_clip.py --spec action_specs\<name>.json
    tools\GVHMR\.venv\Scripts\python.exe pipeline\compare_reference.py --spec action_specs\<name>.json
    tools\GVHMR\.venv\Scripts\python.exe pipeline\render_preview.py action_specs\<name>.json --showcase
+   ```
+
+   Animated GIF input is also accepted. It is converted non-destructively to
+   a cached H.264 working video while preserving the GIF's frame timing:
+
+   ```
+   tools\GVHMR\.venv\Scripts\python.exe pipeline\estimate_pose_gvhmr.py --video plates\<name>\<name>.gif --out plates\<name>\landmarks.json
    ```
 
    `compare_reference.py` tells you which frame windows still differ
