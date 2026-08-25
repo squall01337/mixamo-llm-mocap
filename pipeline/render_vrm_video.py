@@ -37,6 +37,11 @@ def main() -> None:
         raise SystemExit("ffmpeg not found; install it, pass --ffmpeg, or set FFMPEG_EXE")
     frames_dir = output.parent / f"{output.stem}_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
+    # Blender overwrites frames it renders but does not remove trailing frames
+    # from a previous, longer render. Remove only our generated sequence so
+    # ffmpeg cannot silently append stale PNGs to the new video.
+    for stale_frame in frames_dir.glob("frame_*.png"):
+        stale_frame.unlink()
     render_command = [
         str(blender), "--background", str(blend), "--python",
         str(REPO/"pipeline"/"render_vrm_frames.py"), "--",

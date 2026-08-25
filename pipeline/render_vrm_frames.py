@@ -38,14 +38,24 @@ def main() -> None:
     if arm is None or arm.type != "ARMATURE":
         raise RuntimeError(f"profile armature {profile['armature']!r} is not in the scene")
     mapping = profile["humanoid_bones"]
-    scene.frame_set(1)
-    bpy.context.view_layer.update()
-    hips = arm.matrix_world @ arm.pose.bones[mapping["hips"]].matrix.to_translation()
-    heads = [Vector(value) for value in profile["rest_heads_world"].values()]
+    rest_heads = [Vector(value) for value in profile["rest_heads_world"].values()]
+    rest_min_x, rest_max_x = min(p.x for p in rest_heads), max(p.x for p in rest_heads)
+    rest_min_z, rest_max_z = min(p.z for p in rest_heads), max(p.z for p in rest_heads)
+    bone_height = max(0.5, rest_max_z-rest_min_z)
+    bone_width = max(0.5, rest_max_x-rest_min_x)
+    # The camera is fixed, so frame it from the complete animated trajectory.
+    # Rest-pose bounds alone clip root travel, jumps and extended limbs.
+    heads = []
+    for frame in range(scene.frame_start, scene.frame_end + 1):
+        scene.frame_set(frame)
+        bpy.context.view_layer.update()
+        heads.extend(
+            arm.matrix_world @ arm.pose.bones[bone].matrix.to_translation()
+            for bone in mapping.values()
+        )
     min_x, max_x = min(p.x for p in heads), max(p.x for p in heads)
+    min_y = min(p.y for p in heads)
     min_z, max_z = min(p.z for p in heads), max(p.z for p in heads)
-    bone_height = max(0.5, max_z-min_z)
-    bone_width = max(0.5, max_x-min_x)
     # Bone heads stop at the skull base, wrist and ankle. Add asymmetric
     # anatomical margins for hair/head, soles and fingertips. Avoid raw mesh
     # bounds here: tails, skirts and spring-bone accessories can make a normal
@@ -67,7 +77,7 @@ def main() -> None:
     scene.camera = camera
     camera.data.type = "ORTHO"
     camera.data.ortho_scale = ortho_scale
-    camera.location = Vector((0.5*(min_x+max_x), hips.y-4.0, 0.5*(min_z+max_z)))
+    camera.location = Vector((0.5*(min_x+max_x), min_y-max(4.0, 2.0*character_height), 0.5*(min_z+max_z)))
     camera.rotation_euler = (math.radians(90), 0, 0)
 
     scene.render.engine = "BLENDER_WORKBENCH"

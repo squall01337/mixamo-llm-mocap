@@ -287,25 +287,34 @@ def render_stills(scene, arm, hips_bone: str, frames: list[int], out_dir: Path) 
 def validate_contacts(scene, arm, mapping: dict[str, str], frames: list[dict],
                       left_ground: float, right_ground: float) -> dict:
     errors = {"left": [], "right": [], "both_lower": []}
-    positions = {"left": [], "right": []}
+    anchors = {"left": None, "right": None}
+    max_wander = {"left": 0.0, "right": 0.0}
+    previous_support = None
     for frame in frames:
         if float(frame.get("rest_amount", 0.0)) >= 0.65:
+            previous_support = None
             continue
         scene.frame_set(int(frame["frame"]))
         left = world_head(arm, mapping["leftFoot"])
         right = world_head(arm, mapping["rightFoot"])
         support = frame.get("plant", "both")
         if support == "left":
-            errors["left"].append(abs(left.z - left_ground)); positions["left"].append(left.xy)
+            errors["left"].append(abs(left.z - left_ground))
+            if previous_support != "left":
+                anchors["left"] = left.xy.copy()
+            max_wander["left"] = max(max_wander["left"], (left.xy-anchors["left"]).length)
         elif support == "right":
-            errors["right"].append(abs(right.z - right_ground)); positions["right"].append(right.xy)
+            errors["right"].append(abs(right.z - right_ground))
+            if previous_support != "right":
+                anchors["right"] = right.xy.copy()
+            max_wander["right"] = max(max_wander["right"], (right.xy-anchors["right"]).length)
         elif support == "both":
             errors["both_lower"].append(min(abs(left.z-left_ground), abs(right.z-right_ground)))
+        previous_support = support
     result = {key: {"frames": len(values), "max_ground_error_m": max(values, default=0.0)}
               for key, values in errors.items()}
-    for side, values in positions.items():
-        anchor = values[0] if values else Vector()
-        result[side]["max_xy_wander_m"] = max(((value-anchor).length for value in values), default=0.0)
+    for side, wander in max_wander.items():
+        result[side]["max_xy_wander_m"] = wander
     return result
 
 
