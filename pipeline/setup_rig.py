@@ -89,7 +89,7 @@ for _s, _S in (("l", "Left"), ("r", "Right")):
     CAPSULE_PARTS.update({
         f"{_s}_upperarm": (f"mixamorig:{_S}Arm", f"mixamorig:{_S}ForeArm", (f"{_S}Arm",)),
         f"{_s}_forearm": (f"mixamorig:{_S}ForeArm", f"mixamorig:{_S}Hand", (f"{_S}ForeArm",)),
-        f"{_s}_hand": (f"mixamorig:{_S}Hand", f"mixamorig:{_S}HandMiddle1", (f"{_S}Hand",)),
+        f"{_s}_hand": (f"mixamorig:{_S}Hand", f"mixamorig:{_S}HandMiddle4", (f"{_S}Hand",)),
         f"{_s}_thigh": (f"mixamorig:{_S}UpLeg", f"mixamorig:{_S}Leg", (f"{_S}UpLeg",)),
         f"{_s}_shin": (f"mixamorig:{_S}Leg", f"mixamorig:{_S}Foot", (f"{_S}Leg",)),
         f"{_s}_foot": (f"mixamorig:{_S}Foot", f"mixamorig:{_S}Toe_End", (f"{_S}Foot", f"{_S}ToeBase")),
@@ -126,10 +126,11 @@ def measure_capsules(arm) -> dict:
             pa = pb_ = None if h is None else (h if t is None else 0.5 * (h + t))
         else:
             pa, pb_ = head(a), head(b)
-            if pb_ is None and pa is not None and part.endswith("_hand"):
+            if pb_ is None and part.endswith("_hand"):       # no fingertip bone: knuckle, else extrapolate
+                pb_ = head(b.replace("Middle4", "Middle1"))
                 fore = head(a.replace("Hand", "ForeArm"))
-                if fore is not None:
-                    pb_ = pa + (pa - fore) / max(np.linalg.norm(pa - fore), 1e-6) * 0.10
+                if pb_ is None and pa is not None and fore is not None:
+                    pb_ = pa + (pa - fore) / max(np.linalg.norm(pa - fore), 1e-6) * 0.18
         if pa is not None and pb_ is not None:
             pts[part] = (pa, pb_)
     owner = {}
@@ -141,24 +142,32 @@ def measure_capsules(arm) -> dict:
             if b.name.startswith(f"mixamorig:{side}Hand") and b.name != f"mixamorig:{side}Hand":
                 owner[b.name] = f"{side[0].lower()}_hand"
 
+    part_idx = {part: k for k, part in enumerate(pts)}
     dists = {part: [] for part in pts}
     for o in bpy.data.objects:
         if o.type != "MESH" or o.find_armature() is not arm:
             continue
+        me = o.data
+        n = len(me.vertices)
+        co = np.empty(n * 3)
+        me.vertices.foreach_get("co", co)
+        M = np.array(o.matrix_world)
+        co = co.reshape(-1, 3) @ M[:3, :3].T + M[:3, 3]
         names = {g.index: g.name for g in o.vertex_groups}
-        mw = o.matrix_world
-        for v in o.data.vertices:
-            if not v.groups:
+        part_of = np.full(n, -1)
+        for v in me.vertices:          # dominant skin bone per vertex
+            if v.groups:
+                g = max(v.groups, key=lambda e: e.weight)
+                part_of[v.index] = part_idx.get(owner.get(names.get(g.group, "")), -1)
+        for part, k in part_idx.items():
+            P = co[part_of == k]
+            if not len(P):
                 continue
-            g = max(v.groups, key=lambda e: e.weight)
-            part = owner.get(names.get(g.group, ""))
-            if part not in pts:
-                continue
-            p = np.array(mw @ v.co)
             a, b = pts[part]
             ab = b - a
-            t = 0.0 if float(ab @ ab) < 1e-12 else float(np.clip((p - a) @ ab / (ab @ ab), 0.0, 1.0))
-            dists[part].append(float(np.linalg.norm(p - (a + ab * t))))
+            L2 = float(ab @ ab)
+            t = np.zeros(len(P)) if L2 < 1e-12 else np.clip((P - a) @ ab / L2, 0.0, 1.0)
+            dists[part].extend(np.linalg.norm(P - (a + t[:, None] * ab), axis=1).tolist())
     return {part: {"radius": round(float(np.percentile(d, 95)), 4), "max": round(float(max(d)), 4),
                    "vertices": len(d)}
             for part, d in dists.items() if len(d) >= 8}

@@ -172,11 +172,13 @@ def assign_slots(history, n_people: int, length: int):
 
     Detections are assigned per frame by x order, with nearest-centroid
     continuity so a momentarily missed detection does not shift everyone
-    one slot over. In a frame with FEWER boxes than people, a box much
-    wider than the slot it would go to is two overlapping performers
-    detected as one: it is skipped (that frame is interpolated) rather than
-    handed to the nearest slot, which dragged that performer's box — and
-    the centre the next frames are matched against — across both fighters.
+    one slot over. In a frame with FEWER boxes than people, a box that is
+    both much wider than the slot it would go to AND spans the centres of
+    two or more slots is two overlapping performers detected as one: it is
+    skipped (that frame is interpolated) rather than handed to the nearest
+    slot, which dragged that performer's box — and the centre the next
+    frames are matched against — across both fighters. Width alone is not
+    enough: one fighter's box doubles during a kick.
     """
     import numpy as _np
 
@@ -224,7 +226,9 @@ def assign_slots(history, n_people: int, length: int):
         else:
             for d in dets:  # partial frame: nearest slot wins, unless it is two people in one box
                 s = min(range(n_people), key=lambda k: abs(cx(d["bbx_xyxy"]) - slots_x[k]))
-                if width(d["bbx_xyxy"]) > MERGED_WIDTH * float(_np.median(slots_w[s])):
+                b = d["bbx_xyxy"]
+                spans = sum(float(b[0]) <= x <= float(b[2]) for x in slots_x)
+                if width(b) > MERGED_WIDTH * float(_np.median(slots_w[s])) and spans >= 2:
                     continue
                 take(s, f, d["bbx_xyxy"])
     return boxes, seen

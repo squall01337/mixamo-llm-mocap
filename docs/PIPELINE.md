@@ -428,9 +428,14 @@ clip. The human eye is the last word.**
   the smallest `root_offset` that keeps both characters' limbs out of each
   other's torso and head with their mesh-fitted capsules, and refuses a
   window whose ramp is still coming in when the contact happens. Both print
-  the entry to paste. Deciding that a window needs the correction — and
-  where an offset may ramp without skating — stays yours; the mesh contact
-  pass stays the ground truth.
+  the spec's COMPLETE list to paste (`reach` / `root_offset`): entries in
+  other windows or on the other arm are kept, overlapping ones replaced —
+  `clearance` sizes the whole offset for its window, measured with the
+  existing overlapping offset taken back out of the curves, and never drops
+  an existing offset just because the capsules call the window clear.
+  Deciding that a window needs the correction — and where an offset may
+  ramp without skating — stays yours; the mesh contact pass stays the
+  ground truth.
 
 ---
 

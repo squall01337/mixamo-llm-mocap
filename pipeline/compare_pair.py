@@ -73,10 +73,34 @@ LIMBS = {
     "r_foot": ("mixamorig:RightFoot", "mixamorig:RightToe_End"),
     "l_thigh": ("mixamorig:LeftUpLeg", "mixamorig:LeftLeg"),
     "r_thigh": ("mixamorig:RightUpLeg", "mixamorig:RightLeg"),
-    # the fist itself: wrist to knuckles
-    "l_hand": ("mixamorig:LeftHand", "mixamorig:LeftHandMiddle1"),
-    "r_hand": ("mixamorig:RightHand", "mixamorig:RightHandMiddle1"),
+    # the hand itself: wrist to whichever reaches further, the middle
+    # fingertip (open hand) or the middle knuckle (a fist curls the tip back)
+    "l_hand": ("mixamorig:LeftHand", ("mixamorig:LeftHandMiddle4", "mixamorig:LeftHandMiddle1")),
+    "r_hand": ("mixamorig:RightHand", ("mixamorig:RightHandMiddle4", "mixamorig:RightHandMiddle1")),
 }
+
+
+def limb_points(f, df, b0, b1):
+    """World end points of one LIMBS segment. An end given as several bones
+    is the one farthest from the start (bones the rig lacks are skipped)."""
+    p0 = f.bone(df, b0)
+    best = None
+    for name in ((b1,) if isinstance(b1, str) else b1):
+        try:
+            p = f.bone(df, name)
+        except KeyError:
+            continue
+        if best is None or np.linalg.norm(p - p0) > np.linalg.norm(best - p0):
+            best = p
+    if best is None:
+        raise KeyError(b1)
+    return p0, best
+
+
+def limb_gap(p0, p1, r_limb, hips, neck, head, r_torso, r_head) -> float:
+    """Signed clearance between a limb capsule and a body (torso capsule
+    from hips to the shoulder line, head sphere): negative = inside."""
+    return min(seg_seg(p0, p1, hips, neck) - r_torso - r_limb, seg_dist(head, p0, p1) - r_head - r_limb)
 # Paired deliberately: Blender reports a bone's HEAD, so `mixamorig:*Hand`
 # is at the wrist — matching the performer's wrist landmark, not their
 # fingertips (docs/PITFALLS.md #21).
@@ -298,13 +322,12 @@ def main() -> None:
             o_hips, o_neck, o_head = app_body(other, dfo)
             for lname, (b0, b1) in LIMBS.items():
                 try:
-                    p0, p1 = att.bone(dfn, b0), att.bone(dfn, b1)
+                    p0, p1 = limb_points(att, dfn, b0, b1)
                 except KeyError:
                     continue
-                r = att.cap(lname)
-                row["limbs"][f"{side}:{lname}"] = min(
-                    seg_seg(p0, p1, o_hips, o_neck) - other.cap("torso", TORSO_R) - r,
-                    seg_dist(o_head, p0, p1) - other.cap("head", HEAD_R) - r)
+                row["limbs"][f"{side}:{lname}"] = limb_gap(
+                    p0, p1, att.cap(lname), o_hips, o_neck, o_head,
+                    other.cap("torso", TORSO_R), other.cap("head", HEAD_R))
         for tag, bone_name in STRIKERS.items():
             rn = REF_STRIKERS[tag]
             for att, dfn, other, dfo, side in ((A, fa, B, fb, "A"), (B, fb, A, fa, "B")):

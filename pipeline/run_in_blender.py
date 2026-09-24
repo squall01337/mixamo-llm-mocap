@@ -48,7 +48,7 @@ BODIES = {
     "skeleton": 'result = apply_mixamo_fk.export_skeleton("{spec}")',
 }
 
-TIMEOUTS = {"apply": 600.0, "curves": 400.0, "stills": 400.0, "contact": 1800.0, "skeleton": 60.0}
+TIMEOUTS = {"apply": 600.0, "curves": 400.0, "stills": 400.0, "contact": 1800.0, "skeleton": 300.0}
 
 
 def dest_frames_from_spec(spec: dict) -> list[int]:
