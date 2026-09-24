@@ -30,16 +30,18 @@ the performers actually stood, measured from the footage.*
 ```
 video plate (locked camera, T-pose bookends)
    │
-   ├─ 1. estimate_pose_gvhmr.py    GVHMR (SMPL-X mesh recovery) → 33 landmarks + pelvis height
-   ├─ 2. analyze_landmarks.py     numeric beat detection → you write a beat sheet from NUMBERS
+   ├─ 1. estimate_pose_gvhmr.py    GVHMR (SMPL-X mesh recovery) → landmarks, spine/knuckles, contacts
+   ├─ 2. analyze_landmarks.py     numeric beat detection + a draft support schedule, from NUMBERS
    ├─ 3. action_specs/<name>.json  the motion as data: support schedule, rest blends, fists
    ├─ 4. lift_to_mixamo.py         direction-preserving retarget onto YOUR rig's proportions
-   ├─ 5. apply_mixamo_fk.py        FK aim + foot planting, inside live Blender (via Blender MCP)
+   ├─ 5. fk_solve.py               FK aim + foot planting in numpy — no Blender needed
+   │     apply_mixamo_fk.py        the same solve inside live Blender, keys written in bulk
    ├─ 6. qa_clip.py                automated gate: no explosions, no pops, no foot skate
    ├─ 7. compare_reference.py      frame-by-frame vs the video → which windows still differ
-   ├─ 8. compare_pair.py           two-character plates: separation, reach, intrusion
-   ├─ 9. run_in_blender.py contact real mesh-vs-mesh collision between two characters
-   └─ 10. render_preview.py        preview + side-by-side showcase video
+   ├─ 8. size_correctors.py        computes a correction (reach, clearance offset) for a window
+   ├─ 9. compare_pair.py           two-character plates: separation, reach, mesh-fitted contact
+   ├─ 10. run_in_blender.py contact real mesh-vs-mesh collision between two characters
+   └─ 11. render_preview.py        preview + side-by-side showcase video
 ```
 
 With two performers in the plate, stages 1–7 run once per fighter
@@ -48,12 +50,16 @@ scene holding both characters, and `compare_pair.py` checks what only
 exists when there are two of them: whether they stand, reach and miss
 each other the way the performers did.
 
-The estimator provides mesh-quality joints; the lift keeps its segment
-*directions* but rebuilds every position from your character's measured
-bone lengths; the apply plants feet by solving hip height (never IK —
-Mixamo rigs are FK-only); the spec contributes only what a video cannot
-know: which foot is the support in each phase (including `"none"` for
-airborne beats), when fists close, where the clip locks back to rest.
+The estimator provides mesh-quality joints — including the spine, the
+collars, the knuckles and its own foot-contact confidence; the lift keeps
+the segment *directions* but rebuilds every position from your
+character's measured bone lengths, with a pelvis and a chest that twist
+apart and feet that stay planted; the solve plants feet by solving hip
+height (never IK — Mixamo rigs are FK-only). Lift, solve, QA and compare
+run in seconds without Blender; open Blender for the stills and the
+showcase. The spec contributes only what a video cannot know: which foot
+is the support in each phase (including `"none"` for airborne beats), when
+fists close, where the clip locks back to rest.
 
 ## Why it's different
 
@@ -132,6 +138,10 @@ airborne beats), when fists close, where the clip locks back to rest.
    `compare_reference.py` tells you which frame windows still differ
    from the video; the last command produces `preview.mp4` and the
    side-by-side `showcase.mp4` — the same format as the demo GIF above.
+   While iterating on the numbers, `pipeline\fk_solve.py --spec
+   action_specs\<name>.json` stands in for the Blender step: it writes
+   the same `curves.json` from the rig profile, so lift → solve → QA →
+   compare takes seconds and needs no Blender.
 
    Two-performer plates add `--person left|right` to the estimate, one
    spec per fighter, and a `compare_pair.py` run — see
