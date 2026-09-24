@@ -130,6 +130,29 @@ def get_armature(spec: dict):
     return arm
 
 
+def bind_action(arm, spec: dict):
+    """Bind this spec's action to its armature and return it.
+
+    The live scene holds whatever action was applied LAST (docs/PITFALLS.md
+    #16). Anything that reads the pose back — curves, stills, mesh contact —
+    must bind the clip it is asked about first, or it silently measures
+    another clip. Same binding as render_preview.py.
+    """
+    act = bpy.data.actions.get(spec["action_name"])
+    if act is None:
+        raise RuntimeError(f"action {spec['action_name']!r} not in the scene - run the apply first")
+    if arm.animation_data is None:
+        arm.animation_data_create()
+    arm.animation_data.action = act
+    try:
+        for slot in act.slots:
+            arm.animation_data.action_slot = slot
+            break
+    except Exception:
+        pass
+    return act
+
+
 def v(seq) -> Vector:
     return Vector((float(seq[0]), float(seq[1]), float(seq[2])))
 
@@ -565,6 +588,7 @@ def run_stills_render(spec_path: str, dest_frames) -> dict:
     pose_dir = rpath(spec["clip_dir"]) / "poses"
     pose_dir.mkdir(parents=True, exist_ok=True)
     arm = get_armature(spec)
+    bind_action(arm, spec)
     scene = bpy.context.scene
 
     cam_data = bpy.data.cameras.new("QA_Camera")
@@ -614,7 +638,10 @@ def dump_curves(spec_path: str) -> dict:
     """Every bone, every frame: pose channels + world location."""
     spec = json.loads(rpath(spec_path).read_text(encoding="utf-8"))
     arm = get_armature(spec)
-    end = bpy.context.scene.frame_end
+    act = bind_action(arm, spec)
+    # The clip's own length: scene.frame_end belongs to whichever clip was
+    # applied last, which in a two-character scene may be the other one.
+    end = int(round(act.frame_range[1]))
     out = []
     for f in range(1, end + 1):
         bpy.context.scene.frame_set(f)
@@ -665,6 +692,7 @@ def pair_mesh_contact(spec_a: str, spec_b: str, f0: int = 1, f1: int = 0, step: 
 
     def meshes_of(spec):
         arm = get_armature(spec)
+        bind_action(arm, spec)     # measure THIS pair's clips, not whatever is bound
         return [o for o in bpy.data.objects
                 if o.type == "MESH" and o.find_armature() is arm and not o.hide_render]
 
@@ -677,10 +705,13 @@ def pair_mesh_contact(spec_a: str, spec_b: str, f0: int = 1, f1: int = 0, step: 
         for o in objs:
             ev = o.evaluated_get(deps)
             me = ev.to_mesh()
+            # to_mesh() gives object-local coordinates and every mesh has
+            # its OWN world matrix: bring each one to world before merging
+            # (transforming the merged result by the first mesh's matrix
+            # misplaces any mesh that is not parented identically).
+            me.transform(ev.matrix_world)
             bm.from_mesh(me)
-            # to_mesh() gives object-local coordinates; the tree must be world.
             ev.to_mesh_clear()
-        bm.transform(objs[0].matrix_world)
         tree = BVHTree.FromBMesh(bm)
         verts = [v.co.copy() for v in bm.verts]
         bm.free()

@@ -79,7 +79,11 @@ touching a clip a human has partially signed off.
     "desynchronized" when it is in fact a different clip).
     `render_preview.py` binds the spec's action before rendering for
     exactly this reason; anything else that renders the scene must do
-    the same.
+    the same. So must anything that reads the pose back: `curves`,
+    `stills` and `contact` now bind too. Before that, dumping clip A's
+    curves after applying clip B silently wrote B's motion (measured on
+    a test rig: hands 0.22 m off), and every QA and compare figure
+    downstream described the wrong clip.
 
 17. **Head orientation must come from the estimator, or the gaze is a
     lie.** Joint positions cannot describe where a head looks (the head
