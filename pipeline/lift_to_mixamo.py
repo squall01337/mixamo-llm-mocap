@@ -178,6 +178,7 @@ def load_mp(path: Path):
     world = {n: np.zeros((len(frames), 3)) for n in MP_USED}
     times = np.zeros(len(frames))
     pelvis_h = np.zeros(len(frames))
+    pelvis_h_incam = np.full(len(frames), np.nan)   # older landmarks files lack it
     gaze = np.zeros((len(frames), 3))
     # Ground trajectory, two independent estimates (see main()).
     root = np.zeros((len(frames), 2))
@@ -185,6 +186,8 @@ def load_mp(path: Path):
     for i, f in enumerate(frames):
         times[i] = f["t"]
         pelvis_h[i] = float(f.get("pelvis_height", 0.0))
+        if "pelvis_height_incam" in f:
+            pelvis_h_incam[i] = float(f["pelvis_height_incam"])
         g = f.get("gaze")
         if g:
             gaze[i] = g
@@ -197,7 +200,7 @@ def load_mp(path: Path):
         for n in MP_USED:
             w = f["world"][n]
             world[n][i] = (w["x"], w["y"], w["z"])
-    return data["fps"], times, world, pelvis_h, gaze, root, incam
+    return data["fps"], times, world, pelvis_h, gaze, root, incam, pelvis_h_incam
 
 
 def resample(times, series, dst_times):
@@ -379,7 +382,20 @@ def main():
     global PREFILTER
     PREFILTER = int(spec.get("prefilter_window", PREFILTER))
 
-    fps, times, world, pelvis_h, gaze_src, root_src, incam_src = load_mp(rpath(spec["landmarks"]))
+    fps, times, world, pelvis_h, gaze_src, root_src, incam_src, pelvis_h_incam = load_mp(rpath(spec["landmarks"]))
+    # Which estimate of the pelvis arc the airborne (`none`) windows
+    # integrate. "global" (default) is GVHMR's gravity-aligned trajectory,
+    # the source that under-reported the duel's step-in (0.68 m for 0.92 m);
+    # a jump `boost` of 1.35 may be making up the same shortfall. "incam"
+    # measures the arc in the camera frame instead, as the lateral root
+    # motion already does. An A/B, not a new default (docs/PIPELINE.md).
+    pelvis_source = spec.get("pelvis_source", "global")
+    if pelvis_source == "incam":
+        if np.isnan(pelvis_h_incam).any():
+            raise SystemExit("pelvis_source 'incam' needs pelvis_height_incam in landmarks.json — re-run the estimator")
+        pelvis_h = pelvis_h_incam
+    elif pelvis_source != "global":
+        raise SystemExit(f"unknown pelvis_source {pelvis_source!r} (expected 'global' or 'incam')")
     dst_fps = float(spec.get("dst_fps", 30))
     duration = float(times[-1])
     n_dst = int(round(duration * dst_fps)) + 1

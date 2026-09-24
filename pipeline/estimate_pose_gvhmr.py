@@ -36,6 +36,7 @@ feet. That stays the lift's job.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -89,6 +90,28 @@ J = {
 # earlier version did, silently locks the character's gaze to its chest.
 FACE_VERTS = {"nose": 332, "left_eye": 2800, "right_eye": 6260,
               "left_ear": 583, "right_ear": 4071}
+
+# GVHMR's per-frame "static" confidence (`static_conf_logits`), in the
+# network's own joint order (hmr4d/model/gvhmr/utils/postprocess.py). It is
+# trained to fire when a joint moves slower than 0.15 m/s: a planted foot, a
+# held guard — and, for a frame or two, the apex of any strike or kick.
+STATIC_JOINTS = ["left_ankle", "left_foot_index", "right_ankle", "right_foot_index",
+                 "left_wrist", "right_wrist"]
+
+# ViTPose (COCO-17) keypoint order. Its per-joint confidence becomes each
+# landmark's `visibility`; landmarks COCO has no keypoint for inherit the
+# nearest observed joint's confidence.
+COCO17 = ["nose", "left_eye", "right_eye", "left_ear", "right_ear",
+          "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+          "left_wrist", "right_wrist", "left_hip", "right_hip",
+          "left_knee", "right_knee", "left_ankle", "right_ankle"]
+VIS_SOURCE = {n: n for n in COCO17}
+for _s in ("left", "right"):
+    VIS_SOURCE.update({f"{_s}_eye_inner": f"{_s}_eye", f"{_s}_eye_outer": f"{_s}_eye",
+                       f"{_s}_pinky": f"{_s}_wrist", f"{_s}_index": f"{_s}_wrist",
+                       f"{_s}_thumb": f"{_s}_wrist", f"{_s}_heel": f"{_s}_ankle",
+                       f"{_s}_foot_index": f"{_s}_ankle"})
+VIS_SOURCE.update({"mouth_left": "nose", "mouth_right": "nose"})
 
 BODY_MODELS = GVHMR_ROOT / "inputs/checkpoints/body_models"
 CHECKPOINTS = {
@@ -207,7 +230,98 @@ def side_track(tracker, video_path: str, person: str, n_people: int = 2):
     return out
 
 
-def run_gvhmr(video: Path, person: str | None = None) -> dict:
+def plate_fingerprint(video: Path) -> str:
+    """Content hash of a source plate."""
+    h = hashlib.sha1()
+    with open(video, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def check_cache(stamp: Path, fingerprint: str, artifacts: list, fresh: bool = False) -> str:
+    """Keep GVHMR's per-plate cache honest; returns what happened.
+
+    GVHMR caches detections, keypoints, image features and poses under the
+    plate's FILE NAME, and the only staleness test used to be the frame
+    count. Gen-video models emit fixed durations (every plate here is 241
+    frames), so a plate regenerated under the same name silently reused the
+    previous take's poses. The cache is now stamped with the plate's content
+    hash: a different plate, or --fresh, deletes the cached artifacts. An
+    existing cache with no stamp yet is adopted (and stamped) rather than
+    rebuilt, so an upgrade does not recompute every plate.
+    """
+    cached = stamp.read_text(encoding="utf-8").strip() if stamp.exists() else None
+    present = [Path(p) for p in artifacts if Path(p).exists()]
+    if fresh or (cached is not None and cached != fingerprint):
+        for p in present:
+            p.unlink()
+        state = "rebuilt (--fresh)" if fresh else "rebuilt: the plate changed since it was cached"
+    elif cached is None and present:
+        state = "adopted an unstamped cache — pass --fresh if this plate was regenerated"
+    else:
+        state = "valid" if present else "new"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(fingerprint, encoding="utf-8")
+    return state
+
+
+def predict(model, data: dict, postproc: str) -> dict:
+    """GVHMR inference with a choice of its built-in post-processing.
+
+    full  GVHMR's demo behaviour (DemoPL.predict): the static-camera
+          trajectory fix, then a CCD IK that pulls every joint the network
+          calls "static" toward where it was the frame before — ankles,
+          balls of the feet AND wrists — through a leaky blend weighted by
+          that confidence. Designed for hands resting on things.
+    feet  the same, except wrists are never static: a fighter's hands are
+          not contacts, and holding a wrist back while its confidence is up
+          can only shorten the strike it belongs to.
+    none  the raw network output.
+
+    Every mode also returns `static_conf` (L, 6), the network's static
+    probabilities in STATIC_JOINTS order.
+    """
+    from hmr4d.utils.net_utils import detach_to_cpu
+
+    if postproc == "full":
+        pred = detach_to_cpu(model.predict(data, static_cam=True))
+        pred["static_conf"] = pred["net_outputs"]["static_conf_logits"][0].float().sigmoid()
+        pred.pop("net_outputs", None)  # heavy intermediates, not needed
+        return pred
+
+    from hmr4d.model.gvhmr.utils.postprocess import pp_static_joint_cam, process_ik
+    from hmr4d.utils.geo.hmr_cam import normalize_kp2d
+
+    batch = {  # exactly DemoPL.predict's batch
+        "length": data["length"][None],
+        "obs": normalize_kp2d(data["kp2d"], data["bbx_xys"])[None],
+        "bbx_xys": data["bbx_xys"][None],
+        "K_fullimg": data["K_fullimg"][None],
+        "cam_angvel": data["cam_angvel"][None],
+        "f_imgseq": data["f_imgseq"][None],
+    }
+    batch = {k: v.cuda() for k, v in batch.items()}
+    pipe = model.pipeline
+    with torch.no_grad():
+        out = pipe.forward(batch, train=False, postproc=False, static_cam=True)
+        logits = out["static_conf_logits"].clone()
+        if postproc == "feet":
+            out["static_conf_logits"][..., 4:] = -1e4      # wrists: never static
+            out["pred_smpl_params_global"]["transl"] = pp_static_joint_cam(out, pipe.endecoder)
+            body_pose = process_ik(out, pipe.endecoder)
+            out["pred_smpl_params_global"]["body_pose"] = body_pose
+            out["pred_smpl_params_incam"]["body_pose"] = body_pose
+    return detach_to_cpu({
+        "smpl_params_global": {k: v[0] for k, v in out["pred_smpl_params_global"].items()},
+        "smpl_params_incam": {k: v[0] for k, v in out["pred_smpl_params_incam"].items()},
+        "K_fullimg": data["K_fullimg"],
+        "static_conf": logits[0].float().sigmoid(),
+    })
+
+
+def run_gvhmr(video: Path, person: str | None = None, postproc: str = "full",
+              fresh: bool = False) -> dict:
     import hydra
     from hydra import compose, initialize_config_module
 
@@ -215,7 +329,6 @@ def run_gvhmr(video: Path, person: str | None = None) -> dict:
     from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
     from hmr4d.utils.geo.hmr_cam import estimate_K, get_bbx_xys_from_xyxy
     from hmr4d.utils.geo_transform import compute_cam_angvel
-    from hmr4d.utils.net_utils import detach_to_cpu
     from hmr4d.utils.preproc import Extractor, Tracker, VitPoseExtractor
     from hmr4d.utils.video_io_utils import get_video_lwh, get_video_reader, get_writer
 
@@ -229,6 +342,17 @@ def run_gvhmr(video: Path, person: str | None = None) -> dict:
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.preprocess_dir).mkdir(parents=True, exist_ok=True)
 
+    paths = cfg.paths
+    # The default mode keeps GVHMR's own results file; the A/B modes cache
+    # beside it, so switching modes never recomputes the preprocessing.
+    results_path = Path(paths.hmr4d_results)
+    if postproc != "full":
+        results_path = results_path.with_name(f"hmr4d_results_pp-{postproc}.pt")
+    artifacts = [cfg.video_path, paths.bbx, paths.vitpose, paths.vit_features, paths.hmr4d_results,
+                 *Path(paths.hmr4d_results).parent.glob("hmr4d_results_pp-*.pt")]
+    state = check_cache(Path(cfg.output_dir) / "source.sha1", plate_fingerprint(video), artifacts, fresh)
+    print(f"GVHMR cache {cfg.output_dir}: {state}")
+
     # GVHMR restamps the working copy at 30 fps; frame count is unchanged
     # and we keep our own source-fps clock for landmarks.json.
     if not Path(cfg.video_path).exists() or get_video_lwh(video)[0] != get_video_lwh(cfg.video_path)[0]:
@@ -239,7 +363,6 @@ def run_gvhmr(video: Path, person: str | None = None) -> dict:
         writer.close()
         reader.close()
 
-    paths = cfg.paths
     if not Path(paths.bbx).exists():
         tracker = Tracker()
         bbx_xyxy = (side_track(tracker, cfg.video_path, person) if person
@@ -259,7 +382,8 @@ def run_gvhmr(video: Path, person: str | None = None) -> dict:
         torch.save(extractor.extract_video_features(cfg.video_path, bbx_xys), paths.vit_features)
         del extractor
 
-    if not Path(paths.hmr4d_results).exists():
+    pred = torch.load(results_path) if results_path.exists() else None
+    if pred is None or "static_conf" not in pred:
         length, width, height = get_video_lwh(cfg.video_path)
         K_fullimg = estimate_K(width, height).repeat(length, 1, 1)
         data = {
@@ -273,11 +397,16 @@ def run_gvhmr(video: Path, person: str | None = None) -> dict:
         model: DemoPL = hydra.utils.instantiate(cfg.model, _recursive_=False)
         model.load_pretrained_model(cfg.ckpt_path)
         model = model.eval().cuda()
-        pred = detach_to_cpu(model.predict(data, static_cam=True))
-        pred.pop("net_outputs", None)  # heavy intermediates, not needed
-        torch.save(pred, paths.hmr4d_results)
+        fresh_pred = predict(model, data, postproc)
+        if pred is None:
+            pred = fresh_pred
+        else:
+            # A cache written before the static confidences were kept: add
+            # them and leave the cached poses exactly as they were.
+            pred["static_conf"] = fresh_pred["static_conf"]
+        torch.save(pred, results_path)
 
-    return {"pred": torch.load(paths.hmr4d_results), "cfg": cfg}
+    return {"pred": pred, "cfg": cfg}
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +548,40 @@ def project(p: np.ndarray, K: np.ndarray, wh: tuple[int, int]) -> np.ndarray:
     return np.array([u, v, 0.0])
 
 
+def camera_up(joints_world: np.ndarray, joints_cam: np.ndarray, every: int = 2) -> np.ndarray:
+    """Gravity's UP direction, expressed in camera space.
+
+    Every frame arrives twice: gravity-aligned (`joints_world`, y up) and as
+    the camera saw it (`joints_cam`). The rotation between the two, fitted
+    over the whole take on pelvis-centred joints, carries world-up into the
+    camera frame (the same fit compare_pair.py makes, docs/PITFALLS.md #27).
+    """
+    W = np.concatenate([joints_world[i] - joints_world[i, 0] for i in range(0, len(joints_world), every)])
+    C = np.concatenate([joints_cam[i] - joints_cam[i, 0] for i in range(0, len(joints_cam), every)])
+    U, _, Vt = np.linalg.svd(C.T @ W)                   # camera ~= R @ world
+    d = np.sign(np.linalg.det(U @ Vt))
+    R = U @ np.diag([1.0, 1.0, d]) @ Vt
+    return R @ np.array([0.0, 1.0, 0.0])
+
+
+def incam_pelvis_height(joints_world: np.ndarray, joints_cam: np.ndarray) -> np.ndarray:
+    """Pelvis height above the floor, measured in the CAMERA frame.
+
+    `pelvis_height` comes from GVHMR's gravity-aligned trajectory, which is
+    integrated from predicted velocities and only pulled back toward the
+    camera-frame estimate once the two disagree by more than 0.25 m per axis
+    (pp_static_joint_cam). That is the same source that under-reported a
+    0.92 m step as 0.68 m on the duel plate — and the lift's lateral root
+    motion already reads `incam` for that reason. This is the vertical
+    counterpart: the camera-frame hip mid, projected on gravity's up, with
+    the floor at the lowest joint of the take (the global frame's rule).
+    """
+    up = camera_up(joints_world, joints_cam)
+    h = joints_cam @ up                                 # (L, J) heights, arbitrary zero
+    hip_mid = 0.5 * (joints_cam[:, J["l_hip"]] + joints_cam[:, J["r_hip"]])
+    return hip_mid @ up - h.min()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="GVHMR -> MediaPipe-style landmarks.json")
     ap.add_argument("--video", required=True, type=Path)
@@ -427,6 +590,12 @@ def main() -> None:
     ap.add_argument("--person", default=None,
                     help="multi-person plates: which performer to estimate — 'left', 'right', "
                          "or a 0-based slot index ordered left to right. Omit for a solo plate.")
+    ap.add_argument("--postproc", choices=["full", "feet", "none"], default="full",
+                    help="GVHMR post-processing: 'full' (GVHMR's demo, the default), 'feet' (its "
+                         "static-joint IK on the feet only, never the wrists), 'none' (raw network). "
+                         "Each mode caches separately; see docs/PIPELINE.md 'Estimator A/B'.")
+    ap.add_argument("--fresh", action="store_true",
+                    help="discard this plate's cached detections/keypoints/poses and recompute")
     args = ap.parse_args()
 
     def rp(p: Path) -> Path:
@@ -439,10 +608,19 @@ def main() -> None:
     preflight()
     fps = args.fps or video_fps(video)
 
-    res = run_gvhmr(video, args.person)
+    res = run_gvhmr(video, args.person, args.postproc, args.fresh)
     pred = res["pred"]
     joints_ayfz, joints_incam, K, face_ayfz, face_incam = smpl_joints(pred)
     L = joints_ayfz.shape[0]
+    ph_incam = incam_pelvis_height(joints_ayfz, joints_incam)
+    # Signals GVHMR computes and this script used to throw away:
+    #   static  per-joint probability that the joint is not moving (the
+    #           network's own contact detector — what a `plant` schedule
+    #           encodes by hand)
+    #   conf    ViTPose's 2D confidence per keypoint: low = occluded or
+    #           blurred, i.e. the frames where the 3D limb is a guess
+    static = pred["static_conf"].cpu().numpy()                     # (L, 6)
+    conf = np.clip(torch.load(res["cfg"].paths.vitpose)[..., 2].cpu().numpy(), 0.0, 1.0)  # (L, 17)
 
     cap = cv2.VideoCapture(str(video))
     wh = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920, int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080)
@@ -472,15 +650,18 @@ def main() -> None:
         incam_pelvis = joints_incam[i][J["pelvis"]]
         rec = {"frame": i + 1, "t": i / fps, "ok": True,
                "pelvis_height": round(float(-hip_mid[1]), 5),
+               "pelvis_height_incam": round(float(ph_incam[i]), 5),
                "root": [round(float(hip_mid[0]), 5), round(float(hip_mid[2]), 5)],
                "incam_root": [round(float(x), 5) for x in incam_pelvis],
                "gaze": [round(float(x), 5) for x in gaze],
+               "static": {n: round(float(static[i, k]), 4) for k, n in enumerate(STATIC_JOINTS)},
                "image": {}, "world": {}, "incam": {}}
         for n in MP_NAMES:
             w = mp_world[n] - hip_mid  # per-frame mid-hip centered
             im = project(mp_img[n], K, wh)
+            vis = round(float(conf[i, COCO17.index(VIS_SOURCE[n])]), 4)
             rec["world"][n] = {"x": round(float(w[0]), 6), "y": round(float(w[1]), 6), "z": round(float(w[2]), 6),
-                               "visibility": 1.0, "presence": 1.0}
+                               "visibility": vis, "presence": 1.0}
             # Camera-space landmark. `world` above is normalised into the
             # performer's OWN frame (frame 0's facing becomes forward),
             # which is what makes a solo retarget camera-independent — and
@@ -492,11 +673,12 @@ def main() -> None:
                                "y": round(float(mp_img[n][1]), 6),
                                "z": round(float(mp_img[n][2]), 6)}
             rec["image"][n] = {"x": round(float(im[0]), 6), "y": round(float(im[1]), 6), "z": 0.0,
-                               "visibility": 1.0, "presence": 1.0}
+                               "visibility": vis, "presence": 1.0}
         frames.append(rec)
 
     payload = {
         "source": "gvhmr_siga24",
+        "postproc": args.postproc,
         "person": args.person,
         "model": str(CHECKPOINTS["gvhmr"]),
         "fps": fps,

@@ -252,3 +252,15 @@ touching a clip a human has partially signed off.
     the frames where contact is the point — separate an intended
     contact from an unintended one by asking what the source video
     does at that frame.
+
+## Caches and blind spots
+
+39. **The estimator's cache was keyed by file name.** GVHMR caches
+    detections, keypoints, features and poses per plate NAME, and the
+    only staleness test was the frame count. Gen-video models emit
+    fixed durations (every plate here is 241 frames), so a plate
+    regenerated under the same name reused the previous take's poses,
+    with nothing on screen to show it. The cache is now stamped with
+    the plate's content hash (`source.sha1`). `--fresh` forces a
+    rebuild, and a cache that predates the stamp is adopted once,
+    with a note saying so.

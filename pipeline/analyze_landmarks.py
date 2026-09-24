@@ -13,11 +13,16 @@ Prints a per-N-frame table plus detected events:
   - windows where both feet are airborne (true flight)
   - single-leg-up windows (kicks, knees) with the acting side
   - punch windows per arm (wrist depth toward camera, z < -0.32)
+  - arm extension windows in ANY direction (side-on plates, hooks)
   - T-pose spans (wrist span > 1.22 m) — bind candidates
   - shoulder-line yaw (facing wobble vs punch rotation)
+  - low 2D-confidence windows per limb: where the 3D limb is a guess
+  - a DRAFT `plant` schedule, ready to paste into the spec
 
 True joint heights need `pelvis_height` in the landmarks (the GVHMR
 estimator writes it); without it, heights fall back to hip-relative.
+The draft schedule uses GVHMR's own per-foot static confidence when the
+landmarks carry it (`static`, current estimator), ankle heights otherwise.
 """
 
 from __future__ import annotations
@@ -29,6 +34,82 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
+
+PLANT_DOWN = 0.15    # ankle height (m) under which a foot can be the support
+PLANT_UP = 0.25      # both ankles above this = airborne
+STATIC_ON = 0.5      # GVHMR static probability for "this foot is planted"
+MIN_RUN = 3          # source frames; shorter support flickers are merged
+EXTENDED = 0.90      # wrist-to-shoulder distance / arm length = a strike
+LOW_CONF = 0.5       # ViTPose confidence under which a keypoint is doubtful
+
+LIMBS = {
+    "left arm": ("left_shoulder", "left_elbow", "left_wrist"),
+    "right arm": ("right_shoulder", "right_elbow", "right_wrist"),
+    "left leg": ("left_hip", "left_knee", "left_ankle"),
+    "right leg": ("right_hip", "right_knee", "right_ankle"),
+    "head": ("nose", "left_ear", "right_ear"),
+}
+
+
+def draft_plant(la_h, ra_h, st_l=None, st_r=None) -> list:
+    """Support schedule from the numbers: [(first, last, support)], 1-based.
+
+    A foot is planted when its ankle is near the floor and, if the
+    estimator says so, not moving. Frames with no planted foot and both
+    ankles high are airborne; an airborne run also claims the unplanted
+    frames on either side of it (push-off and touch-down), which is where
+    a height-only detector fires late and eats the launch
+    (docs/PIPELINE.md, `none` tuning notes). Anything else unplanted
+    falls back to `both`, which lets the apply plant the lower foot.
+    """
+    n = len(la_h)
+    lp = la_h < PLANT_DOWN
+    rp = ra_h < PLANT_DOWN
+    if st_l is not None:
+        lp &= st_l > STATIC_ON
+        rp &= st_r > STATIC_ON
+    lab = []
+    for i in range(n):
+        if lp[i] and rp[i]:
+            lab.append("both")
+        elif lp[i]:
+            lab.append("left")
+        elif rp[i]:
+            lab.append("right")
+        elif la_h[i] > PLANT_UP and ra_h[i] > PLANT_UP:
+            lab.append("none")
+        else:
+            lab.append("?")
+    for i in range(n):                      # airborne runs claim adjacent '?' frames
+        if lab[i] == "none":
+            j = i - 1
+            while j >= 0 and lab[j] == "?":
+                lab[j] = "none"
+                j -= 1
+            j = i + 1
+            while j < n and lab[j] == "?":
+                lab[j] = "none"
+                j += 1
+    lab = ["both" if s == "?" else s for s in lab]
+
+    runs = []
+    for i, s in enumerate(lab):
+        if runs and runs[-1][2] == s:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i, s])
+    merged = []
+    for r in runs:                          # fold flickers into their predecessor
+        if merged and (r[1] - r[0] + 1) < MIN_RUN:
+            merged[-1][1] = r[1]
+        elif merged and merged[-1][2] == r[2]:
+            merged[-1][1] = r[1]
+        else:
+            merged.append(list(r))
+    if len(merged) > 1 and (merged[0][1] - merged[0][0] + 1) < MIN_RUN:
+        merged[1][0] = merged[0][0]
+        merged.pop(0)
+    return [(a + 1, b + 1, s) for a, b, s in merged]
 
 
 def main():
@@ -87,10 +168,85 @@ def main():
         for s in segments(np.where(z < -0.32)[0]):
             print(f"{nm} wrist toward camera (z<-0.32): f{s[0]+1}-f{s[-1]+1} (min {z[s].min():+.2f} @ f{s[z[s].argmin()]+1})")
 
+    # Strikes in ANY direction. The z test above only sees punches thrown
+    # at the camera; on a side-on plate (the duel) they travel across the
+    # frame. Extension = wrist-to-shoulder distance over the arm's length.
+    for nm in ("left", "right"):
+        sh = np.array([w(i, f"{nm}_shoulder") for i in range(n)])
+        el = np.array([w(i, f"{nm}_elbow") for i in range(n)])
+        wr = np.array([w(i, f"{nm}_wrist") for i in range(n)])
+        arm_len = np.median(np.linalg.norm(el - sh, axis=1) + np.linalg.norm(wr - el, axis=1))
+        ext = np.linalg.norm(wr - sh, axis=1) / max(arm_len, 1e-6)
+        tpose = span > 1.22
+        for s in segments(np.where((ext > EXTENDED) & ~tpose)[0]):
+            k = s[int(ext[s].argmax())]
+            print(f"{nm} arm extended (>{EXTENDED:.0%} of its length, any direction): "
+                  f"f{s[0]+1}-f{s[-1]+1} (peak {ext[k]:.0%} @ f{k+1})")
+
     for s in segments(np.where(span > 1.22)[0], gap=4):
         print(f"T-pose span (>1.22 m): f{s[0]+1}-f{s[-1]+1}")
     print(f"shoulder-line yaw range: {yaw.min():+.0f}..{yaw.max():+.0f} deg "
           "(punches rotate shoulders ±40-60 without turning the hips)")
+
+    if "pelvis_height_incam" in F[0]:
+        phc = np.array([f["pelvis_height_incam"] for f in F])
+
+        def excursion(a):
+            base_ = float(np.median(a[: max(10, n // 12)]))
+            return float(a.max() - base_), float(base_ - a.min())
+
+        (gu, gd), (cu, cd) = excursion(ph), excursion(phc)
+        print(f"pelvis arc, gravity-aligned vs camera frame: rise {gu:.3f} vs {cu:.3f} m, "
+              f"dip {gd:.3f} vs {cd:.3f} m"
+              + (f"  (camera/global rise x{cu / gu:.2f})" if gu > 0.05 else ""))
+
+    # Where the 3D limb is a guess. ViTPose's per-keypoint confidence
+    # (`visibility`, current estimator) drops when a limb is occluded or
+    # motion-blurred; GVHMR still returns a limb there, from its prior.
+    vis = {nm: np.array([F[i]["world"][nm].get("visibility", 1.0) for i in range(n)])
+           for nm in ("nose", "left_ear", "right_ear", "left_shoulder", "right_shoulder",
+                      "left_elbow", "right_elbow", "left_wrist", "right_wrist",
+                      "left_hip", "right_hip", "left_knee", "right_knee",
+                      "left_ankle", "right_ankle")}
+    if any(float(v.min()) < 0.999 for v in vis.values()):
+        found = False
+        for limb, joints in LIMBS.items():
+            lo = np.min([vis[j] for j in joints], axis=0)
+            for s in segments(np.where(lo < LOW_CONF)[0], gap=2):
+                if len(s) < MIN_RUN:
+                    continue
+                found = True
+                worst = min(joints, key=lambda j: vis[j][s].min())
+                print(f"low 2D confidence, {limb}: f{s[0]+1}-f{s[-1]+1} "
+                      f"(min {lo[s].min():.2f} at {worst}) — occluded or blurred; the 3D limb here is a guess")
+        if not found:
+            print(f"2D confidence: every limb above {LOW_CONF} on every frame")
+    else:
+        print("2D confidence: not in this landmarks file (re-run the estimator to get it)")
+
+    # A DRAFT support schedule. The estimator's per-foot static confidence
+    # is its own contact detector; heights alone are the fallback.
+    if has_ph:
+        st = None
+        if "static" in F[0]:
+            def foot_static(side):
+                return np.array([max(F[i]["static"][f"{side}_ankle"], F[i]["static"][f"{side}_foot_index"])
+                                 for i in range(n)])
+            st = (foot_static("left"), foot_static("right"))
+        plan = draft_plant(la_h, ra_h, *(st or (None, None)))
+        src = "GVHMR static confidence + ankle height" if st else "ankle height only (no `static` in this file)"
+        print(f"\ndraft plant schedule — from {src}; check each window against the events above:")
+        print('  "plant": [')
+        for k, (a, b, s) in enumerate(plan):
+            note = ""
+            if s in ("left", "right"):
+                other, h = ("right", ra_h) if s == "left" else ("left", la_h)
+                k_ = a - 1 + int(h[a - 1:b].argmax())
+                note = f', "comment": "draft: {other} ankle peaks {h[k_]:.2f} m @ src{k_ + 1}"'
+            elif s == "none":
+                note = f', "comment": "draft: lower ankle peaks {np.minimum(la_h, ra_h)[a - 1:b].max():.2f} m"'
+            print(f'    {{ "src": [{a}, {b}], "support": "{s}"{note} }}{"," if k < len(plan) - 1 else ""}')
+        print("  ]")
 
 
 if __name__ == "__main__":

@@ -37,7 +37,22 @@ points, not torso-derived: head orientation cannot be recovered from
 joint positions, and a retarget without it can only lock the character's
 gaze to its chest.
 GVHMR caches its preprocessing under `tools/GVHMR/outputs/demo/<stem>/`
-— re-runs are fast.
+— re-runs are fast. The cache is stamped with the plate's content hash
+(`source.sha1`): a plate regenerated under the same name is detected and
+recomputed, where it used to silently reuse the previous take's poses
+(gen-video plates all share one length, so the old frame-count test could
+not tell them apart). `--fresh` forces a rebuild.
+
+Each frame also carries three signals GVHMR computes anyway:
+
+- `static` — the network's per-joint probability that a joint is not
+  moving (ankles, balls of the feet, wrists): its own contact detector,
+  the evidence a `plant` schedule encodes.
+- `visibility` — ViTPose's 2D confidence per keypoint (it used to be a
+  constant 1.0). Low means occluded or blurred: the 3D limb there is the
+  estimator's guess (docs/PITFALLS.md #7).
+- `pelvis_height_incam` — the pelvis height measured in the camera frame,
+  projected on gravity (see section 11).
 
 ## 2. Numeric beat sheet — BEFORE any spec
 
@@ -59,6 +74,17 @@ windows, the acting limb, the support foot, and the *numeric evidence*
   > 0.25 m. Ducks/jumps: `pelvis_height` dips/peaks.
 - Shoulder-line yaw swings ±40–60° during punches without the hips
   turning — don't read those as facing changes.
+- Side-on plates throw punches across the frame, not at the camera:
+  read the `arm extended (... any direction)` lines instead of wrist z.
+- `low 2D confidence` windows name the frames where a limb was occluded
+  or blurred — the first place to look when a beat retargets wrong.
+
+The tool ends with a **draft `plant` schedule** in spec syntax, built
+from GVHMR's per-foot `static` confidence and ankle heights (heights
+alone for older landmarks files). Airborne runs are extended to the true
+push-off and touch-down, which a height threshold alone misses. It is a
+starting point, not a verdict: check every window against the events
+above before it goes into the spec.
 
 ## 3. The action_spec (the motion as data)
 
@@ -555,3 +581,59 @@ the `contact` stage exist: they turn "his arm clips his back" into a
 frame window and a distance in metres, so the fix can be sized instead
 of guessed — and so an over-correction is caught on the next run
 instead of after it ships.
+
+## 11. Estimator A/B (experimental, opt-in)
+
+Several spec correctors compensate for the estimator rather than for the
+retarget: `reach` (strikes come back short), `boost` (jumps come back
+low), `leg_pose` (a kick apex comes back low). Reading GVHMR's source
+suggests two mechanisms upstream of the lift that can each produce those
+symptoms. Neither is proven; both are cheap to test, and the defaults are
+unchanged until a plate says otherwise.
+
+**1. GVHMR's post-processing IK includes the wrists.** After the network,
+GVHMR's demo path (`process_ik`, hmr4d/model/gvhmr/utils/postprocess.py)
+builds a target for the ankles, the balls of the feet **and the wrists**:
+`target[i] = target[i-1]·c + current[i]·(1−c)`, with `c` the network's
+"static" probability (trained to fire under 0.15 m/s). It then runs a
+CCD IK toward those targets and writes the result into both the
+gravity-aligned and the camera-frame pose. For feet that is contact
+cleanup. For a fighter's hands it is a lag filter, strongest exactly
+where a strike decelerates into its apex. How much it costs depends on
+the wrist `static` values during strikes, which landmarks.json now
+records.
+
+```
+... estimate_pose_gvhmr.py --video <plate> --out plates\<name>\landmarks_feet.json --postproc feet
+... estimate_pose_gvhmr.py --video <plate> --out plates\<name>\landmarks_raw.json  --postproc none
+```
+
+`feet` keeps GVHMR's foot cleanup and never treats a wrist as static;
+`none` is the raw network. Each mode caches beside the default, so the
+preprocessing is not recomputed.
+
+**2. The gravity-aligned trajectory is only loosely tied to the camera.**
+With a static camera, GVHMR integrates its predicted velocities and pulls
+the result back toward the camera-frame estimate only once they differ
+by **more than 0.25 m per axis** (`pp_static_joint_cam`). The duel plate's
+step-in was under-reported by 0.24 m, just inside that dead band. Section
+9.3 already reads lateral root motion from `incam` for this reason.
+Heights take the same path: `pelvis_height`, which the airborne windows
+integrate, comes from that trajectory. 0.92 / 0.68 = 1.35, the `boost`
+the spin plate needed; that may be a coincidence, and it is testable:
+
+```jsonc
+"pelvis_source": "incam"    // integrate pelvis_height_incam in `none` windows (default "global")
+```
+
+`analyze_landmarks.py` prints both arcs side by side (`pelvis arc,
+gravity-aligned vs camera frame`).
+
+**Protocol.** Run the variant on a plate whose spec carries the
+corrector in question: the spin plate for `reach` and `boost`, the duel
+for `leg_pose`. Point a copy of the spec at the variant's landmarks, with
+the corrector removed. Then lift, apply and run `compare_reference.py`
+(and `compare_pair.py` for the duel). If the windows the corrector was
+sized for come back within tolerance without it, the variant wins on
+that plate. Keep the corrector otherwise. One change per pass, as
+always.
