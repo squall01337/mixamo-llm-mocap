@@ -236,8 +236,11 @@ python pipeline\run_in_blender.py all action_specs\<motion>.json
 ```
 
 (`apply` keys the action — ~2–4 min per 300 frames, Blender's UI
-freezes, that's normal; `curves` dumps every bone every frame;
-`stills` renders front+side PNGs at the spec's QA frames. Run stages
+freezes, that's normal; it pauses the character's mesh skinning while it
+runs, since it reads bone matrices only — identical keys, and about half
+the time on a 15k-vertex test rig. `curves` dumps every bone every frame;
+`stills` renders front+side PNGs at the spec's QA frames. Both bind the
+spec's own action first (docs/PITFALLS.md #16). Run stages
 individually with `apply|curves|stills`.) Agents with MCP can instead
 call `apply_mixamo_fk.run/dump_curves/run_stills_render` directly via
 `execute_blender_code`.

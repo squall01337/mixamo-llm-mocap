@@ -455,21 +455,30 @@ def measure(arm, f: int) -> dict:
     }
 
 
-def run(spec_path: str) -> dict:
-    spec = json.loads(rpath(spec_path).read_text(encoding="utf-8"))
-    payload = json.loads(rpath(spec["joints_out"]).read_text(encoding="utf-8"))
-    frames = payload["frames"]
-    end = len(frames)
-    src_fps = float(payload.get("src_fps", 24))
-    dst_fps = float(payload.get("dst_fps", 30))
+def _pause_deform(arm) -> list:
+    """Switch off (viewport only) the Armature modifiers that skin this
+    armature's meshes; return them so the caller can switch them back.
 
-    use_profile(spec.get("rig_profile"))
-    arm = get_armature(spec)
-    bpy.context.view_layer.objects.active = arm
-    if bpy.context.mode != "POSE":
-        bpy.ops.object.mode_set(mode="POSE")
-    action = ensure_action(arm, spec["action_name"], end)
+    The keying pass calls view_layer.update() ~100 times per frame (every
+    aim, the hip search, the gaze solve) and reads nothing but BONE
+    matrices, yet each update also re-skins every mesh the armature
+    deforms. Pose evaluation does not depend on the meshes, so the keyed
+    numbers are identical with the skinning paused.
+    """
+    paused = []
+    for o in bpy.data.objects:
+        if o.type != "MESH":
+            continue
+        for m in o.modifiers:
+            if (m.type == "ARMATURE" and m.show_viewport and m.object is not None
+                    and m.object.name == arm.name):
+                m.show_viewport = False
+                paused.append(m)
+    return paused
 
+
+def _key_frames(arm, spec: dict, frames: list, src_fps: float, dst_fps: float) -> None:
+    """The per-frame solve + keying pass (see the module docstring)."""
     # Optional per-window amplitude boost for airborne arcs (the
     # estimator tends to understate jump height; `"boost": 1.3` on a
     # `none` plant window scales the integrated pelvis deltas).
@@ -555,6 +564,30 @@ def run(spec_path: str) -> dict:
         prev_hip_y = float(arm.pose.bones["mixamorig:Hips"].location[1])
         prev_ph = ph
         key_pose(arm, f)
+
+
+def run(spec_path: str) -> dict:
+    spec = json.loads(rpath(spec_path).read_text(encoding="utf-8"))
+    payload = json.loads(rpath(spec["joints_out"]).read_text(encoding="utf-8"))
+    frames = payload["frames"]
+    end = len(frames)
+    src_fps = float(payload.get("src_fps", 24))
+    dst_fps = float(payload.get("dst_fps", 30))
+
+    use_profile(spec.get("rig_profile"))
+    arm = get_armature(spec)
+    bpy.context.view_layer.objects.active = arm
+    if bpy.context.mode != "POSE":
+        bpy.ops.object.mode_set(mode="POSE")
+    action = ensure_action(arm, spec["action_name"], end)
+
+    paused = _pause_deform(arm)
+    try:
+        _key_frames(arm, spec, frames, src_fps, dst_fps)
+    finally:
+        for m in paused:
+            m.show_viewport = True
+        bpy.context.view_layer.update()
 
     set_linear(action)
     bpy.context.scene.frame_set(1)
