@@ -3,9 +3,9 @@ Blender 5.1 (via the official Blender MCP, or pipeline/blender_exec.py).
 
 Per-frame the joints file carries the support foot ("plant": left /
 right / both / none), the fist amount, the rest-blend amount and the
-estimator's absolute pelvis height. This module aims each mixamorig
-bone at its lifted joint (armature space, FK only — no constraints, no
-IK), then resolves the hip height:
+estimator's absolute pelvis height. Each mixamorig bone is aimed at its
+lifted joint (armature space, FK only — no constraints, no IK), then the
+hip height is resolved:
 
   left/right  binary-search hips Y so that foot lands at GROUND_Z,
               then flatten it (Z-only, keeps estimator XZ + heading)
@@ -14,10 +14,15 @@ IK), then resolves the hip height:
               last applied height (continuous takeoff, ballistic flight)
   rest>=0.65  exact rest height (start/end T-pose)
 
+`run()` solves in numpy (pipeline/fk_solve.py) from the live armature's
+rest matrices and writes the whole action in bulk, then checks Blender's
+own evaluation against the solve. `run_legacy()` is the original
+depsgraph-driven solver it was matched against, kept as the reference.
+
 Usage inside Blender:
     import apply_mixamo_fk
     result = apply_mixamo_fk.run("action_specs/<motion>.json")
-Then, separately (keeps the long keying pass in one socket request):
+Then, separately:
     apply_mixamo_fk.dump_curves("action_specs/<motion>.json")
     apply_mixamo_fk.run_stills_render("action_specs/<motion>.json", [1, ...])
 """
@@ -34,6 +39,7 @@ from mathutils import Quaternion, Vector
 REPO = Path(__file__).resolve().parents[1]
 GROUND_Z = 0.105      # Y Bot rest ankle height (flat-foot contact)
 HIP_HEIGHT = 0.99792  # Y Bot rest hip height
+BALL_Z = 0.03284      # Y Bot rest ball (ToeBase head) height
 FPS = 30
 
 
@@ -46,7 +52,7 @@ def use_profile(path=None) -> str:
     hip height and planting the Ninja at the Y Bot's ground offset
     buries its feet.
     """
-    global GROUND_Z, HIP_HEIGHT
+    global GROUND_Z, HIP_HEIGHT, BALL_Z
     p = (Path(path) if Path(path).is_absolute() else REPO / path) if path else (REPO / "rig_profile.json")
     if not p.exists():
         if path:
@@ -55,6 +61,8 @@ def use_profile(path=None) -> str:
     _p = json.loads(p.read_text(encoding="utf-8"))
     GROUND_Z = float(_p["ground_z"])
     HIP_HEIGHT = float(_p["hip_height"])
+    if "l_foot" in _p.get("rest", {}) and "r_foot" in _p.get("rest", {}):
+        BALL_Z = 0.5 * (float(_p["rest"]["l_foot"][2]) + float(_p["rest"]["r_foot"][2]))
     return p.name
 
 
@@ -566,7 +574,8 @@ def _key_frames(arm, spec: dict, frames: list, src_fps: float, dst_fps: float) -
         key_pose(arm, f)
 
 
-def run(spec_path: str) -> dict:
+def run_legacy(spec_path: str) -> dict:
+    """The original depsgraph-driven solver (reference for fk_solve)."""
     spec = json.loads(rpath(spec_path).read_text(encoding="utf-8"))
     payload = json.loads(rpath(spec["joints_out"]).read_text(encoding="utf-8"))
     frames = payload["frames"]
@@ -606,6 +615,134 @@ def run(spec_path: str) -> dict:
     }
     (clip_dir / "apply_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
+
+
+def write_keys(arm, action, sol: dict) -> None:
+    """Write a whole solved clip into `action` in one go: one F-curve per
+    channel, every key set with foreach_set, linear interpolation — the
+    channels key_pose() inserts one key at a time (rotations of every keyed
+    bone, locations zero except Hips, so stale channels cannot leak)."""
+    import fk_solve
+    import numpy as np
+
+    frames = np.asarray(sol["frames"], float)
+    n = len(frames)
+    linear = [1] * n     # BEZT_IPO_LIN
+
+    def fill(fc, values):
+        kp = fc.keyframe_points
+        kp.add(n)
+        co = np.empty(2 * n)
+        co[0::2], co[1::2] = frames, values
+        kp.foreach_set("co", co.tolist())
+        kp.foreach_set("interpolation", linear)
+        fc.update()
+
+    for b, name in enumerate(sol["names"]):
+        if not fk_solve.keyed(name):
+            continue
+        base = f'pose.bones["{name}"]'
+        for ch in range(4):
+            fill(action.fcurve_ensure_for_datablock(arm, base + ".rotation_quaternion", index=ch,
+                                                     group_name=name), sol["q"][:, b, ch])
+        loc = sol["loc"][:, b] if name == "mixamorig:Hips" else np.zeros((n, 3))
+        for ch in range(3):
+            fill(action.fcurve_ensure_for_datablock(arm, base + ".location", index=ch, group_name=name),
+                 loc[:, ch])
+
+
+def _self_check(arm, sol: dict, dest_frames) -> float:
+    """Largest distance between Blender's evaluation of the written keys and
+    the numpy solve, over key bones at the given frames. Guards the rig: a
+    bone setting the solver does not model shows up here, not in a clip."""
+    idx = {n: i for i, n in enumerate(sol["names"])}
+    worst = 0.0
+    for f in dest_frames:
+        t = sol["frames"].index(f)
+        bpy.context.scene.frame_set(f)
+        bpy.context.view_layer.update()
+        for n in ("mixamorig:Hips", "mixamorig:Head", "mixamorig:LeftHand", "mixamorig:RightHand",
+                  "mixamorig:LeftFoot", "mixamorig:RightFoot", "mixamorig:LeftToeBase", "mixamorig:RightToeBase"):
+            if n in idx:
+                worst = max(worst, (world_loc(arm, n) - Vector(sol["world"][t, idx[n]].tolist())).length)
+    return worst
+
+
+def run(spec_path: str) -> dict:
+    """Solve the clip in numpy (fk_solve) and write the action in bulk.
+
+    Same solve as run_legacy(), bone for bone, without ~100 depsgraph
+    evaluations per frame: the rig's rest matrices are read once from the
+    live armature. Blender's own evaluation of the written keys is then
+    compared with the solve at a spread of frames; a mismatch over 1 mm is
+    reported in the result (use run_legacy() for that rig and say so).
+    """
+    import time
+
+    import fk_solve
+
+    spec = json.loads(rpath(spec_path).read_text(encoding="utf-8"))
+    payload = json.loads(rpath(spec["joints_out"]).read_text(encoding="utf-8"))
+    frames = payload["frames"]
+    end = len(frames)
+    src_fps = float(payload.get("src_fps", 24))
+    dst_fps = float(payload.get("dst_fps", 30))
+
+    use_profile(spec.get("rig_profile"))
+    arm = get_armature(spec)
+    bpy.context.view_layer.objects.active = arm
+    if bpy.context.mode != "POSE":
+        bpy.ops.object.mode_set(mode="POSE")
+    reset_pose(arm)
+    action = ensure_action(arm, spec["action_name"], end)
+
+    fk_solve.set_constants(GROUND_Z, HIP_HEIGHT, BALL_Z)
+    t0 = time.perf_counter()
+    sol = fk_solve.solve(frames, spec, fk_solve.Skeleton.from_blender(arm))
+    t1 = time.perf_counter()
+    write_keys(arm, action, sol)
+    t2 = time.perf_counter()
+
+    qa_dest = [max(1, min(end, int(round((sf - 1) * dst_fps / src_fps + 1)))) for sf in spec.get("qa_src_frames", [])]
+    check_frames = sorted({1, end, *range(1, end + 1, max(1, end // 12)), *qa_dest})
+    worst = _self_check(arm, sol, check_frames)
+    bpy.context.scene.frame_set(1)
+    bpy.context.view_layer.update()
+
+    samples = [measure(arm, f) for f in qa_dest]
+    clip_dir = rpath(spec["clip_dir"])
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    (clip_dir / "retarget_samples.json").write_text(json.dumps(samples, indent=2), encoding="utf-8")
+    result = {
+        "action": spec["action_name"],
+        "frames": end,
+        "solver": "fk_solve",
+        "solve_seconds": round(t1 - t0, 2),
+        "write_seconds": round(t2 - t1, 2),
+        "selfcheck_max_err_m": round(worst, 6),
+        "samples": samples,
+        "constraints": [c.name for pb in arm.pose.bones for c in pb.constraints],
+    }
+    if worst > 0.001:
+        result["WARNING"] = (f"Blender's evaluation differs from the solve by {worst * 1000:.1f} mm on this rig "
+                             "- apply with run_legacy() (run_in_blender.py apply --legacy) and report it")
+    (clip_dir / "apply_result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result
+
+
+def export_skeleton(spec_path: str) -> dict:
+    """Add this character's rest skeleton to its rig profile, so fk_solve.py
+    can solve the clip outside Blender (profiles written by setup_rig.py /
+    setup_duo.py already carry it)."""
+    import fk_solve
+
+    spec = json.loads(rpath(spec_path).read_text(encoding="utf-8"))
+    arm = get_armature(spec)
+    p = rpath(spec.get("rig_profile", "rig_profile.json"))
+    prof = json.loads(p.read_text(encoding="utf-8"))
+    prof["skeleton"] = fk_solve.Skeleton.from_blender(arm).to_profile()
+    p.write_text(json.dumps(prof, indent=1), encoding="utf-8")
+    return {"profile": str(p), "bones": len(prof["skeleton"]["bones"])}
 
 
 def run_stills_render(spec_path: str, dest_frames) -> dict:

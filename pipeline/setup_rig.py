@@ -22,9 +22,11 @@ Validates the import against the conventions the pipeline relies on
 mixamorig: bones rooted at mixamorig:Hips — then saves the .blend the
 FK apply runs in AND writes `rig_profile.json` at the repo root: the
 character's measured rest-joint positions, bone lengths, hip height
-and ground height. The lift/apply/QA read that profile, which is what
-makes the pipeline work with any Mixamo character's proportions
-(without a profile they fall back to built-in Y Bot measurements).
+and ground height, and its rest skeleton. The lift/apply/QA read that
+profile, which is what makes the pipeline work with any Mixamo
+character's proportions (without a profile they fall back to built-in
+Y Bot measurements); fk_solve.py uses the skeleton to solve clips
+without Blender.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from pathlib import Path
 import bpy
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Profile joint -> bone whose (posed-rest) head is that joint.
 PROFILE_JOINTS = {
@@ -109,12 +112,17 @@ def dump_rig_profile(arm, out_path: Path) -> dict:
             raise SystemExit(f"cannot measure bone length {key} ({bone})")
         lengths[key] = round(pb.length * scale, 5)
 
+    import fk_solve
+
     profile = {
         "character": [o.name for o in bpy.data.objects if o.type == "MESH"],
         "hip_height": rest["hips"][2],
         "ground_z": round(0.5 * (rest["l_ankle"][2] + rest["r_ankle"][2]), 5),
         "rest": rest,
         "lengths": lengths,
+        # The rest skeleton (hierarchy + armature-space rest matrices), so
+        # fk_solve.py can solve this character's clips outside Blender.
+        "skeleton": fk_solve.Skeleton.from_blender(arm).to_profile(),
     }
     out_path.write_text(json.dumps(profile, indent=1), encoding="utf-8")
     return profile

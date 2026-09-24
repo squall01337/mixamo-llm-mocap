@@ -261,15 +261,33 @@ running. One command drives all three Blender-side stages:
 python pipeline\run_in_blender.py all action_specs\<motion>.json
 ```
 
-(`apply` keys the action — ~2–4 min per 300 frames, Blender's UI
-freezes, that's normal; it pauses the character's mesh skinning while it
-runs, since it reads bone matrices only — identical keys, and about half
-the time on a 15k-vertex test rig. `curves` dumps every bone every frame;
-`stills` renders front+side PNGs at the spec's QA frames. Both bind the
-spec's own action first (docs/PITFALLS.md #16). Run stages
-individually with `apply|curves|stills`.) Agents with MCP can instead
-call `apply_mixamo_fk.run/dump_curves/run_stills_render` directly via
+(`apply` solves the clip in numpy (`pipeline/fk_solve.py`, from the
+live armature's rest matrices) and writes the whole action in one go —
+seconds, not minutes, no frozen UI. It then evaluates the written keys in
+Blender at a spread of frames and reports the largest disagreement with
+the solve (`selfcheck_max_err_m` in `apply_result.json`, a WARNING above
+1 mm). `--legacy` runs the original depsgraph solver it was matched
+against — 0.002 mm apart over every bone and frame of a 301-frame test
+clip. `curves` dumps every bone every frame; `stills` renders front+side
+PNGs at the spec's QA frames. Both bind the spec's own action first
+(docs/PITFALLS.md #16). Run stages individually with
+`apply|curves|stills`.) Agents with MCP can instead call
+`apply_mixamo_fk.run/dump_curves/run_stills_render` directly via
 `execute_blender_code`.
+
+**Without Blender.** The same solve runs from the command line and writes
+the clip's `curves.json` (the file `curves` dumps) plus `keys.json`:
+
+```
+tools\GVHMR\.venv\Scripts\python.exe pipeline\fk_solve.py --spec action_specs\<motion>.json
+```
+
+so a pass — lift, solve, `qa_clip.py`, `compare_reference.py` — takes
+seconds and needs no Blender at all; open Blender for the stills and the
+showcase once the numbers say the pass is worth looking at. It reads the
+character's rest skeleton from its rig profile: profiles written by
+`setup_rig.py` / `setup_duo.py` carry it, older ones get it with
+`python pipeline\run_in_blender.py skeleton action_specs\<motion>.json`.
 
 Stills and previews use a temporary camera + Workbench render
 (window-independent); never use viewport screenshots — they capture

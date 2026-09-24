@@ -63,10 +63,12 @@ touching a clip a human has partially signed off.
 12. **Viewport screenshots capture black** when the Blender window is
     occluded or minimized. Stills go through a temporary camera +
     Workbench render (`run_stills_render`), always.
-13. **The long apply blocks Blender's UI.** 300 frames ≈ 2–4 minutes of
-    frozen window while the socket request executes. Normal; don't
-    kill it. Results are also written to disk (`apply_result.json`) so
-    a dropped socket loses nothing.
+13. **The long apply blocked Blender's UI.** 300 frames ≈ 2–4 minutes of
+    frozen window while the socket request executed — about 100
+    depsgraph evaluations per frame. The apply now solves in numpy and
+    writes the keys in bulk (seconds); only `apply --legacy` still
+    blocks like that. Results are also written to disk
+    (`apply_result.json`) so a dropped socket loses nothing.
 14. **mcp SDK 2.x breaks the official Blender MCP server** (it imports
     `mcp.server.fastmcp`, removed in 2.0). Pin `mcp[cli]<2` when
     registering the server.
