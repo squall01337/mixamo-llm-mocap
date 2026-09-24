@@ -413,6 +413,24 @@ clip. The human eye is the last word.**
 - When the estimator and the human's read of the video disagree, the
   human is right (occlusion, foreshortening) — encode the fix as an
   `arm_override`, don't fight the estimator globally.
+- Size a corrector by computation, not by passes, where a sizer exists:
+
+  ```
+  ... size_correctors.py reach --spec action_specs\<motion>.json --src 172 204
+  ... size_correctors.py clearance --spec action_specs\duel_ybot.json ^
+        --with action_specs\duel_ninja.json --src 116 185 --ramp 23
+  ```
+
+  `reach` lifts the spec in-process and bisects the factor until the
+  retarget's peak arm extension in the window matches the performer's (a
+  one-frame jab through an 11-frame prefilter: 84.3% of arm length for the
+  performer's 97.0%; sized factor 1.151, back to 97.0%). `clearance` finds
+  the smallest `root_offset` that keeps both characters' limbs out of each
+  other's torso and head with their mesh-fitted capsules, and refuses a
+  window whose ramp is still coming in when the contact happens. Both print
+  the entry to paste. Deciding that a window needs the correction — and
+  where an offset may ramp without skating — stays yours; the mesh contact
+  pass stays the ground truth.
 
 ---
 

@@ -173,7 +173,8 @@ def mp_to_mix(p):
     return np.array([p[0], p[2], -p[1] + HIP_Z], dtype=np.float64)
 
 
-PREFILTER = 7    # default landmark prefilter width, in SOURCE frames
+DEFAULT_PREFILTER = 7    # default landmark prefilter width, in SOURCE frames
+PREFILTER = DEFAULT_PREFILTER
 
 
 def smooth_series(arr, window=None, poly=2):
@@ -631,11 +632,10 @@ def window_amount(dest_f, rise, fall, src2dest):
     return 1.0 - smoother((dest_f - f0) / max(1.0, f1 - f0))
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--spec", required=True, type=Path)
-    args = ap.parse_args()
-    spec = json.loads(rpath(args.spec).read_text(encoding="utf-8"))
+def lift(spec: dict) -> tuple[dict, list]:
+    """Lift one action_spec: returns the joints payload main() writes to
+    `joints_out`, and the report lines it prints. Callable in-process
+    (size_correctors.py lifts the same spec many times)."""
     used_profile = load_profile(spec.get("rig_profile"))
     # Landmark prefilter width. 7 frames is right for ordinary motion and
     # measurably expensive on a fast strike: on the duel plate's roundhouse
@@ -643,7 +643,7 @@ def main():
     # docs/PITFALLS.md #18, one stage earlier. Narrow it for plates whose
     # money shot is a single fast beat.
     global PREFILTER
-    PREFILTER = int(spec.get("prefilter_window", PREFILTER))
+    PREFILTER = int(spec.get("prefilter_window", DEFAULT_PREFILTER))
 
     fps, times, world, pelvis_h, gaze_src, root_src, incam_src, pelvis_h_incam, aux = load_mp(rpath(spec["landmarks"]))
     # Which estimate of the pelvis arc the airborne (`none`) windows
@@ -1236,16 +1236,13 @@ def main():
         "action_spec": spec["name"],
         "frames": joints,
     }
-    out_path = rpath(spec["joints_out"])
-    out_path.write_text(json.dumps(payload), encoding="utf-8")
-    print("wrote", out_path, "frames", n_dst)
-    print(f"profile: {used_profile.name if used_profile else 'built-in Y Bot'} "
-          f"(hip {HIP_Z:.3f} m, arm {LEN['l_arm'] + LEN['l_fore']:.3f} m)")
+    lines = [f"profile: {used_profile.name if used_profile else 'built-in Y Bot'} "
+             f"(hip {HIP_Z:.3f} m, arm {LEN['l_arm'] + LEN['l_fore']:.3f} m)"]
     if root_motion or stage.any():
-        print(f"stage x={stage[0]:+.3f} y={stage[1]:+.3f} | root motion "
-              f"{'ON (' + root_source + ')' if root_motion else 'off'} scale {root_scale:.3f} "
-              f"travel {np.linalg.norm(root[-1] - root[0]):.3f} m, "
-              f"max {np.abs(root).max():.3f} m")
+        lines.append(f"stage x={stage[0]:+.3f} y={stage[1]:+.3f} | root motion "
+                     f"{'ON (' + root_source + ')' if root_motion else 'off'} scale {root_scale:.3f} "
+                     f"travel {np.linalg.norm(root[-1] - root[0]):.3f} m, "
+                     f"max {np.abs(root).max():.3f} m")
 
     for sfq in spec.get("qa_src_frames", []):
         f = int(round(src2dest(sfq)))
@@ -1253,11 +1250,25 @@ def main():
         j = joints[f - 1]
         bx = np.asarray(j["basis_x"], float)
         yaw = np.degrees(np.arctan2(-bx[1], bx[0]))
-        print(
+        lines.append(
             f"src{sfq:3d}/dest{f:3d} rest={j['rest_amount']:.2f} fist={j['fist_amount']:.2f} "
             f"plant={j['plant']:5s} yaw={yaw:+4.0f} "
             f"lw={j['l_wrist']} rw={j['r_wrist']} ra={j['r_ankle']}"
         )
+    return payload, lines
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", required=True, type=Path)
+    args = ap.parse_args()
+    spec = json.loads(rpath(args.spec).read_text(encoding="utf-8"))
+    payload, lines = lift(spec)
+    out_path = rpath(spec["joints_out"])
+    out_path.write_text(json.dumps(payload), encoding="utf-8")
+    print("wrote", out_path, "frames", payload["frame_count"])
+    for line in lines:
+        print(line)
 
 
 if __name__ == "__main__":
