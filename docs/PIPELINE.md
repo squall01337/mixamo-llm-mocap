@@ -158,8 +158,8 @@ ramped; they leave the rest of the clip untouched):
 // hands together and folds the wrists at anything beyond ~2 cm.
 "arm_pose": [
   { "src": [138, 206], "ramp_src": 6, "side": "both",
-    "drop_m": 0.145,      // + lowers the hands along an arc
-    "widen_m": 0.085 }    // + opens the hands apart
+    "drop_m": 0.145,      // + lowers the hands along an arc, − raises them
+    "widen_m": 0.085 }    // + opens the hands apart, − brings them together
   // also accepts raw "pitch_deg" / "yaw_deg" if you prefer angles
 ],
 

@@ -549,11 +549,13 @@ def main():
                 continue
             amt *= float(af.get("amount", 1.0))
             drop = float(af.get("drop_m", 0.0))     # extra lowering, e.g. for a head that sits lower
-            # Anchor: "head" reproduces what the eye compares (hand height
-            # relative to the face) and is exact even when the character's
-            # head sits differently on its shoulders; "shoulders" keeps the
-            # anatomical shoulder-relative geometry instead.
-            if af.get("anchor", "head") == "head":
+            # Anchor: "shoulders" (the default, as documented) keeps the
+            # anatomical shoulder-relative geometry. "head" matches hand
+            # height relative to the face instead, but pairs the performer's
+            # NOSE with a joint near the character's skull base
+            # (docs/PITFALLS.md #29) and can drive the hands into the torso
+            # when proportions differ.
+            if af.get("anchor", "shoulders") == "head":
                 ref_sh = mp["nose"][i]
                 char_sh = np.asarray(rec["head"], float)
             else:
@@ -630,14 +632,16 @@ def main():
                             hi = mid
                     return 0.5 * (lo + hi) * s_dir
 
+                # Signed targets: a negative drop_m raises the hands and a
+                # negative widen_m brings them together.
                 a_pitch = pitch
                 if abs(drop) > 1e-4:
-                    a_pitch += solve(lat, -abs(drop), lambda v: float(np.dot(v, up)))
+                    a_pitch += solve(lat, -drop, lambda v: float(np.dot(v, up)))
                 a_yaw = yaw * sign
                 if abs(widen) > 1e-4:
                     # widen_m is the change in the DISTANCE BETWEEN the hands;
                     # each arm therefore moves half of it.
-                    a_yaw += solve(up, abs(widen) * 0.5 * sign, lambda v: float(np.dot(v, lat)))
+                    a_yaw += solve(up, widen * 0.5 * sign, lambda v: float(np.dot(v, lat)))
                 for k in (f"{s}_elbow", f"{s}_wrist", f"{s}_hand"):
                     v = np.asarray(rec[k], float) - sock
                     if abs(a_pitch) > 1e-5:
