@@ -319,6 +319,14 @@ tools\GVHMR\.venv\Scripts\python.exe pipeline\qa_clip.py --spec action_specs\<mo
 | airborne | lower-foot clearance > 0.12 m | the jump actually flies |
 | end frame | hand error < 0.03 vs rest | clean T-pose out |
 | frame-jumps | < 0.30 m per bone | teleporting limbs |
+| grounded skate | runs < 0.02 m (WARN) | a foot sliding while on the floor, ANY window |
+
+The single-support row only covers the frames the lift pins. The
+grounded-skate row covers the rest: `both` windows, where nothing pins a
+foot and every sway of the pelvis over planted feet shows up as the feet
+sliding under a pelvis that stays put, and the frames just after a pinned
+window while the pin's offset decays. It reports each sliding run in
+source frames; a pivot on the ball or the heel does not count.
 
 `WARN` on a `both` window usually means a genuine step (weight shift,
 stance widening) — check the video before "fixing" it. **Numbers can

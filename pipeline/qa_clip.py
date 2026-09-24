@@ -20,13 +20,22 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
 GROUND_Z = 0.105
+BALL_Z = 0.0328      # rest height of the ToeBase head (ball of the foot)
 REST_LW = (0.7378, 1.4357)
 REST_RW = (-0.7378, 1.4356)
+
+# Grounded-foot skate (check 4b). A foot is on the floor when its ankle or
+# its ball sits within GROUNDED_TOL of rest contact height; a frame slides
+# when that foot moves more than SLIDE_EPS horizontally; a sliding run is
+# reported once it adds up to SKATE_WARN.
+GROUNDED_TOL = 0.02
+SLIDE_EPS = 0.001
+SKATE_WARN = 0.02
 
 
 def use_profile(path=None) -> str:
     """This character's measured rest geometry (see setup_rig.py)."""
-    global GROUND_Z, REST_LW, REST_RW
+    global GROUND_Z, BALL_Z, REST_LW, REST_RW
     p = (Path(path) if Path(path).is_absolute() else REPO / path) if path else (REPO / "rig_profile.json")
     if not p.exists():
         if path:
@@ -34,9 +43,36 @@ def use_profile(path=None) -> str:
         return "built-in Y Bot"
     _p = json.loads(p.read_text(encoding="utf-8"))
     GROUND_Z = float(_p["ground_z"])
+    if "l_foot" in _p["rest"] and "r_foot" in _p["rest"]:
+        BALL_Z = 0.5 * (float(_p["rest"]["l_foot"][2]) + float(_p["rest"]["r_foot"][2]))
     REST_LW = (_p["rest"]["l_wrist"][0], _p["rest"]["l_wrist"][2])
     REST_RW = (_p["rest"]["r_wrist"][0], _p["rest"]["r_wrist"][2])
     return p.name
+
+
+def skate_runs(ankle: np.ndarray, ball: np.ndarray) -> tuple[np.ndarray, list]:
+    """Horizontal slide of one foot while it is on the floor.
+
+    Returns the per-frame slide (metres, index i = move from frame i to
+    i+1) and the contiguous sliding runs as (first, last, total) frame
+    indices. The slide is the SMALLER of the ankle's and the ball's moves:
+    a pivot keeps one of them planted and is not skate.
+    """
+    grounded = (ankle[:, 2] < GROUND_Z + GROUNDED_TOL) | (ball[:, 2] < BALL_Z + GROUNDED_TOL)
+    move = np.minimum(np.linalg.norm(np.diff(ankle[:, :2], axis=0), axis=1),
+                      np.linalg.norm(np.diff(ball[:, :2], axis=0), axis=1))
+    slide = np.where(grounded[:-1] & grounded[1:], move, 0.0)
+    runs, i = [], 0
+    while i < len(slide):
+        if slide[i] <= SLIDE_EPS:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(slide) and slide[j + 1] > SLIDE_EPS:
+            j += 1
+        runs.append((i, j, float(slide[i:j + 1].sum())))
+        i = j + 1
+    return slide, runs
 
 
 def rpath(p) -> Path:
@@ -119,6 +155,32 @@ def main():
             tag = "OK" if zerr < 0.06 else "WARN"
             extra = "" if sup == "both" else f", XZ wander {skate:.3f} m"
             print(f"[{tag}] plant {sup:5s} dest {a}-{b} {foot.split(':')[1]}: |z-{GROUND_Z}| max {zerr:.3f}{extra}")
+
+    # 4b. Grounded-foot skate over the WHOLE clip.
+    #
+    # Check 4 measures wander only inside single-support windows, which
+    # are exactly the frames where the lift pins the support ankle. A foot
+    # on the floor slides just as visibly elsewhere: in "both" windows
+    # nothing pins it, and with hip-centred landmarks every sway of the
+    # pelvis over planted feet comes out as the feet sliding under a pelvis
+    # that stays put; and in the frames right after a pinned window, while
+    # the pin's offset decays. Warn-only: a genuine shuffle step also
+    # slides, so read the video before "fixing" a run.
+    def src_of(d):
+        return (d - 1) * src_fps / dst_fps + 1
+
+    for side in ("Left", "Right"):
+        ankle = np.array([w(i, f"mixamorig:{side}Foot") for i in range(n)])
+        ball = np.array([w(i, f"mixamorig:{side}ToeBase") for i in range(n)])
+        slide, runs = skate_runs(ankle, ball)
+        bad = sorted((r for r in runs if r[2] > SKATE_WARN), key=lambda r: -r[2])
+        tag = "WARN" if bad else "OK"
+        print(f"[{tag}] grounded skate {side}Foot: {slide.sum():.3f} m of slide on the floor"
+              f" ({int((slide > SLIDE_EPS).sum())} frames), {len(bad)} run(s) > {SKATE_WARN:.2f} m")
+        for i0, i1, tot in bad[:3]:
+            d0, d1 = i0 + 1, i1 + 2       # the run moves the foot from frame d0 to frame d1
+            print(f"       dest {d0}-{d1} (src {src_of(d0):.0f}-{src_of(d1):.0f}): {tot:.3f} m, "
+                  f"net {float(np.linalg.norm(ankle[d1 - 1, :2] - ankle[d0 - 1, :2])):.3f} m")
 
     # 5. End pose == rest.
     lh, rh = w(n - 1, "mixamorig:LeftHand"), w(n - 1, "mixamorig:RightHand")

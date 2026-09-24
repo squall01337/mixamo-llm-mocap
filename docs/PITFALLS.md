@@ -264,3 +264,13 @@ touching a clip a human has partially signed off.
     the plate's content hash (`source.sha1`). `--fresh` forces a
     rebuild, and a cache that predates the stamp is adopted once,
     with a note saying so.
+40. **QA never measured skate in double support.** The plant check
+    reports XZ wander only in single-support windows, which are the
+    frames the lift pins. In `both` windows nothing pins either foot,
+    and hip-centred landmarks turn every sway of the pelvis over planted
+    feet into feet sliding under a still pelvis. A synthetic weight
+    shift (feet fixed in the ground truth, pelvis ±8 cm) came out with
+    the feet sliding over a 16 cm range, and the verdict was PASS. The
+    frames right after a pinned window slide too, while the pin's offset
+    decays. `qa_clip.py` now reports grounded skate over the whole clip.
+    Read those runs before trusting a `both` window.
