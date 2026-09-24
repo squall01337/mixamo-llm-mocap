@@ -163,33 +163,28 @@ def video_fps(path: Path) -> float:
 # Stage 1 — GVHMR demo pipeline (preprocess + predict), no rendering.
 # Results are cached in <GVHMR_ROOT>/outputs/demo/<video_name>/.
 
-def side_track(tracker, video_path: str, person: str, n_people: int = 2):
-    """Bounding boxes for ONE performer in a multi-person plate, selected
-    by the side of frame they occupy.
+MERGED_WIDTH = 1.6   # a lone box this much wider than its slot's recent boxes holds two people
 
-    GVHMR's own `get_one_track` keeps the single largest track, which is
-    useless when two people fight. Selecting by YOLO track id is fragile:
-    ids swap when two bodies touch, and a swap silently splices half of
-    each performer into one "track". Screen side is a fact instead of a
-    guess — as long as the plate never lets them cross (see the duel
-    plate's SOURCE.md), left stays left for the whole take.
 
-    Detections are assigned per frame to `n_people` slots ordered by x,
-    with nearest-centroid continuity so a momentarily missed detection
-    does not shift everyone one slot over.
+def assign_slots(history, n_people: int, length: int):
+    """Per-frame boxes for `n_people` slots ordered left to right (see
+    side_track). Pure logic — no GVHMR imports — so it can be tested.
+
+    Detections are assigned per frame by x order, with nearest-centroid
+    continuity so a momentarily missed detection does not shift everyone
+    one slot over. In a frame with FEWER boxes than people, a box much
+    wider than the slot it would go to is two overlapping performers
+    detected as one: it is skipped (that frame is interpolated) rather than
+    handed to the nearest slot, which dragged that performer's box — and
+    the centre the next frames are matched against — across both fighters.
     """
     import numpy as _np
-    import torch as _torch
-    from hmr4d.utils.seq_utils import (frame_id_to_mask, get_frame_id_list_from_mask,
-                                       linear_interpolate_frame_ids, rearrange_by_mask)
-    from hmr4d.utils.net_utils import moving_average_smooth
-    from hmr4d.utils.video_io_utils import get_video_lwh
-
-    history = tracker.track(video_path)
-    length = get_video_lwh(video_path)[0]
 
     def cx(b):
         return 0.5 * (float(b[0]) + float(b[2]))
+
+    def width(b):
+        return float(b[2]) - float(b[0])
 
     # Seed the slots from the first frame that sees everyone.
     seed = None
@@ -200,9 +195,17 @@ def side_track(tracker, video_path: str, person: str, n_people: int = 2):
     if seed is None:
         raise SystemExit(f"never saw {n_people} people in the same frame — is this a solo plate?")
     slots_x = [cx(d["bbx_xyxy"]) for d in seed]
+    slots_w = [[width(d["bbx_xyxy"])] for d in seed]
 
     boxes = _np.zeros((n_people, length, 4), dtype=_np.float32)
     seen = [[] for _ in range(n_people)]
+
+    def take(s, f, b):
+        boxes[s, f] = b
+        slots_x[s] = cx(b)
+        slots_w[s] = (slots_w[s] + [width(b)])[-15:]
+        seen[s].append(f)
+
     for f, frame in enumerate(history[:length]):
         dets = sorted(frame, key=lambda d: cx(d["bbx_xyxy"]))
         if len(dets) >= n_people:
@@ -217,15 +220,39 @@ def side_track(tracker, video_path: str, person: str, n_people: int = 2):
                     chosen.append(k)
                 chosen = sorted(chosen, key=lambda j: cx(dets[j]["bbx_xyxy"]))
             for s, j in enumerate(chosen):
-                boxes[s, f] = dets[j]["bbx_xyxy"]
-                slots_x[s] = cx(dets[j]["bbx_xyxy"])
-                seen[s].append(f)
+                take(s, f, dets[j]["bbx_xyxy"])
         else:
-            for d in dets:  # partial frame: nearest slot wins
+            for d in dets:  # partial frame: nearest slot wins, unless it is two people in one box
                 s = min(range(n_people), key=lambda k: abs(cx(d["bbx_xyxy"]) - slots_x[k]))
-                boxes[s, f] = d["bbx_xyxy"]
-                slots_x[s] = cx(d["bbx_xyxy"])
-                seen[s].append(f)
+                if width(d["bbx_xyxy"]) > MERGED_WIDTH * float(_np.median(slots_w[s])):
+                    continue
+                take(s, f, d["bbx_xyxy"])
+    return boxes, seen
+
+
+def side_track(tracker, video_path: str, person: str, n_people: int = 2):
+    """Bounding boxes for ONE performer in a multi-person plate, selected
+    by the side of frame they occupy.
+
+    GVHMR's own `get_one_track` keeps the single largest track, which is
+    useless when two people fight. Selecting by YOLO track id is fragile:
+    ids swap when two bodies touch, and a swap silently splices half of
+    each performer into one "track". Screen side is a fact instead of a
+    guess — as long as the plate never lets them cross (see the duel
+    plate's SOURCE.md), left stays left for the whole take.
+
+    Detections are assigned to slots by assign_slots().
+    """
+    import numpy as _np
+    import torch as _torch
+    from hmr4d.utils.seq_utils import (frame_id_to_mask, get_frame_id_list_from_mask,
+                                       linear_interpolate_frame_ids, rearrange_by_mask)
+    from hmr4d.utils.net_utils import moving_average_smooth
+    from hmr4d.utils.video_io_utils import get_video_lwh
+
+    history = tracker.track(video_path)
+    length = get_video_lwh(video_path)[0]
+    boxes, seen = assign_slots(history, n_people, length)
 
     order = {"left": 0, "right": n_people - 1}
     slot = order[person] if person in order else int(person)

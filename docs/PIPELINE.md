@@ -434,7 +434,10 @@ ends up inside a skull. What changes:
 frame they occupy**, not by tracker id. Ids swap when two bodies touch,
 and a swap splices half of each performer into one "track"; screen side
 is a fact as long as the plate never lets them cross — which is why the
-plate contract forbids it (docs/PROMPTING.md). Caches are per person,
+plate contract forbids it (docs/PROMPTING.md). When the two overlap and
+the detector sees ONE box around both, that box is skipped (it is much
+wider than either fighter's recent boxes) and the frame interpolated,
+instead of being handed to the nearest fighter. Caches are per person,
 so the two runs do not fight over the same preprocessing.
 
 Each landmarks file then carries, besides the solo fields, `root`

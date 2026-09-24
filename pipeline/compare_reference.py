@@ -93,10 +93,14 @@ def main() -> None:
         return np.array(curves[f - 1]["bones"][b]["world_location"])
 
     # Character vs performer proportion (head above shoulders), so a
-    # hand-height delta can be split into pose and proportion.
+    # hand-height delta can be split into pose and proportion. Both sides
+    # over the SAME source frames (the opening bind); the character used to
+    # be averaged over its first 40 destination frames (32 source frames)
+    # against the performer's first 60.
+    bind_src = range(1, min(60, len(lm)) + 1)
     ref_head = float(np.mean([
         -(ref(i, "nose")[1] - 0.5 * (ref(i, "left_shoulder")[1] + ref(i, "right_shoulder")[1]))
-        for i in range(min(60, len(lm)))])) * S
+        for i in (sf - 1 for sf in bind_src)])) * S
     def face_z(f):
         """Height of the character's FACE. The Head bone sits at the base
         of the skull; the performer's reference point is the nose, so
@@ -109,7 +113,7 @@ def main() -> None:
 
     app_head = float(np.mean([
         face_z(f) - 0.5 * (bone(f, "mixamorig:LeftArm")[2] + bone(f, "mixamorig:RightArm")[2])
-        for f in range(1, min(40, len(curves)) + 1)]))
+        for f in sorted({min(len(curves), int(round((sf - 1) * dst_fps / src_fps + 1))) for sf in bind_src})]))
     proportion = app_head - ref_head
 
     def metrics_ref(i):
