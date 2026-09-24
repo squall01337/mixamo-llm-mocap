@@ -278,3 +278,22 @@ touching a clip a human has partially signed off.
     and the lift pins every planted foot, not only the single-support
     one (`pin: "contacts"`, the default): on the same weight shift the
     feet now hold within 1 mm and the pelvis sways its 16 cm.
+
+## Torso and hands
+
+41. **One torso frame turns the hips with the shoulders.** The lift used to
+    build a single torso frame, mostly from the shoulder line, and a
+    straight spine along it. A performer turning the shoulders 45 degrees
+    over square hips came out with the HIPS turned 39 degrees (the leg
+    sockets swung round with them) and the chest 6 degrees short; a
+    30-degree spine flexion came out as a 15-degree tilt of the whole
+    torso about the hips. Punches live on exactly that hip/shoulder
+    separation. The pelvis now follows the hip line, the chest the
+    collars, and the estimator's spine joints bend the spine
+    (`torso: "twist"`, docs/PIPELINE.md 4.1).
+42. **Joint positions cannot say how a hand is turned — the same lesson as
+    #17, one limb down.** The hand's direction was extrapolated from the
+    forearm and its roll was whatever the shortest-arc aim left: an
+    80-degree supination came out 153 degrees wrong. The knuckles on the
+    estimator's mesh carry the wrist's real orientation; the lift passes
+    the index-to-pinky line and the solver rolls forearm and hand to it.

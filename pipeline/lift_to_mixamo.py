@@ -202,6 +202,10 @@ def load_mp(path: Path):
     # GVHMR's own "this joint is not moving" probability per foot point
     # (current estimator only): the evidence contact pinning weighs.
     static = {k: np.full(len(frames), np.nan) for k in STATIC_KEYS}
+    # Extra skeleton points (current estimator only): spine column,
+    # collars, knuckles, toe tips — see estimate_pose_gvhmr.py BODY_*.
+    names = sorted(frames[0].get("body", {})) if frames else []
+    body = {n: np.full((len(frames), 3), np.nan) for n in names}
     for i, f in enumerate(frames):
         times[i] = f["t"]
         pelvis_h[i] = float(f.get("pelvis_height", 0.0))
@@ -219,10 +223,14 @@ def load_mp(path: Path):
         for k in STATIC_KEYS:
             if k in f.get("static", {}):
                 static[k][i] = float(f["static"][k])
+        for n in names:
+            if n in f.get("body", {}):
+                body[n][i] = f["body"][n]
         for n in MP_USED:
             w = f["world"][n]
             world[n][i] = (w["x"], w["y"], w["z"])
-    aux = {"static": None if any(np.isnan(v).any() for v in static.values()) else static}
+    aux = {"static": None if any(np.isnan(v).any() for v in static.values()) else static,
+           "body": body if body and not any(np.isnan(v).any() for v in body.values()) else None}
     return data["fps"], times, world, pelvis_h, gaze, root, incam, pelvis_h_incam, aux
 
 
@@ -245,19 +253,24 @@ def place_chain(up, left):
 
 def rest_pose():
     out = {k: v.copy() for k, v in REST.items()}
-    out["basis_x"] = np.array([1.0, 0.0, 0.0])
-    out["basis_y"] = np.array([0.0, 1.0, 0.0])
-    out["basis_z"] = np.array([0.0, 0.0, 1.0])
+    for pre in ("basis_", "pelvis_", "chest_"):
+        out[pre + "x"] = np.array([1.0, 0.0, 0.0])
+        out[pre + "y"] = np.array([0.0, 1.0, 0.0])
+        out[pre + "z"] = np.array([0.0, 0.0, 1.0])
+    out["neck_up"] = np.array([0.0, 0.0, 1.0])
+    # Index-to-pinky knuckle direction in a palms-down T-pose: character back.
+    out["l_hand_lat"] = np.array([0.0, 1.0, 0.0])
+    out["r_hand_lat"] = np.array([0.0, 1.0, 0.0])
     return out
 
 
 def blend_pose(a, b, t):
+    """Blend pose `a` toward `b` over `a`'s own keys (the rest pose carries
+    frames a rigid-torso lift does not emit; they must not appear)."""
     t = float(np.clip(t, 0.0, 1.0))
     out = {}
-    for k in set(a) | set(b):
-        if k not in a:
-            out[k] = b[k]
-        elif k not in b:
+    for k in a:
+        if k not in b:
             out[k] = a[k]
         else:
             out[k] = lerp(np.asarray(a[k], float), np.asarray(b[k], float), t)
@@ -376,6 +389,133 @@ def reconstruct(mp, i):
         "r_foot": r_foot, "r_toe": r_toe,
         "basis_x": x, "basis_y": y, "basis_z": z,
     }
+
+
+def _rest_dist(a, b):
+    return float(np.linalg.norm(REST[b] - REST[a]))
+
+
+def reconstruct_twist(mp, i, body=None):
+    """reconstruct() with a pelvis and a chest instead of one rigid torso.
+
+    reconstruct() gives the Hips one frame, mostly the shoulder line
+    (shoulders + 0.35 x hips), and builds the spine as a straight rod along
+    it: when the performer turned the shoulders 45 degrees with the hips
+    square, the retarget turned the HIPS 39 degrees, dragged the leg sockets
+    round with them, and had no spine to twist or bend.
+
+    Here the pelvis frame comes from the hip line and the chest frame from
+    the shoulder line (the collar line when the estimator provides it); the
+    legs hang off the pelvis and the arms off the chest; the solver spreads
+    the twist between them over Spine / Spine1 / Spine2. With the
+    estimator's `body` block the spine follows the performer's own spine
+    joints (it bends), the clavicles follow their collars, the hands point
+    at their middle knuckles and carry their roll (index-to-pinky line), and
+    the toes point at the real toe tips.
+
+    `basis_*` is still the old mixed frame: arm_overrides, arm_pose and
+    head_look were sized in it, and their numbers keep their meaning.
+    """
+    ls, rs = mp["left_shoulder"][i], mp["right_shoulder"][i]
+    lh, rh = mp["left_hip"][i], mp["right_hip"][i]
+    nose = mp["nose"][i]
+    hip_mid = 0.5 * (lh + rh)
+    sh_mid = 0.5 * (ls + rs)
+    up = unit(sh_mid - hip_mid)
+    if np.linalg.norm(up) < 0.2:
+        up = np.array([0.0, 0.0, 1.0])
+    x, y, z = place_chain(up, unit((ls - rs) + (lh - rh) * 0.35))
+    hips = np.array([hip_mid[0], hip_mid[1], HIP_Z])
+
+    def B(n):
+        return body[n][i]
+
+    if body is not None:
+        up_p = unit(B("spine1") - hip_mid)
+        up_c = unit(B("neck") - B("spine3"))
+        lat_c = B("left_collar") - B("right_collar")
+    else:
+        up_p = up_c = up
+        lat_c = ls - rs
+    xp, yp, zp = place_chain(up_p if np.linalg.norm(up_p) > 0.2 else up, lh - rh)
+    xc, yc, zc = place_chain(up_c if np.linalg.norm(up_c) > 0.2 else up, lat_c)
+
+    def in_frame(origin, bx, by, bz, off):
+        return origin + bx * off[0] + by * off[1] + bz * off[2]
+
+    if body is not None:
+        spine = in_frame(hips, xp, yp, zp, REST["spine"] - REST["hips"])
+        spine1 = spine + unit(B("spine2") - B("spine1")) * _rest_dist("spine", "spine1")
+        spine2 = spine1 + unit(B("spine3") - B("spine2")) * _rest_dist("spine1", "spine2")
+        neck = spine2 + unit(B("neck") - B("spine3")) * _rest_dist("spine2", "neck")
+        head = neck + unit(B("head") - B("neck")) * _rest_dist("neck", "head")
+        l_shoulder = in_frame(spine2, xc, yc, zc, REST["l_shoulder"] - REST["spine2"])
+        r_shoulder = in_frame(spine2, xc, yc, zc, REST["r_shoulder"] - REST["spine2"])
+        l_arm = l_shoulder + unit(ls - B("left_collar")) * LEN["l_shoulder"]
+        r_arm = r_shoulder + unit(rs - B("right_collar")) * LEN["r_shoulder"]
+    else:
+        spine = hips + up * np.linalg.norm(REST["spine"] - REST["hips"])
+        spine1 = spine + up * LEN["spine1"]
+        spine2 = spine1 + up * LEN["spine2"]
+        neck = spine2 + up * LEN["neck"]
+        head = neck + up * LEN["head"] * 0.85 + unit(np.array([nose[0], nose[1], 0.0])) * 0.02
+        l_shoulder = in_frame(hips, xc, yc, zc, REST["l_shoulder"] - REST["hips"])
+        r_shoulder = in_frame(hips, xc, yc, zc, REST["r_shoulder"] - REST["hips"])
+        l_arm = l_shoulder + unit((ls - sh_mid) + xc * 0.35) * LEN["l_shoulder"]
+        r_arm = r_shoulder + unit((rs - sh_mid) - xc * 0.35) * LEN["r_shoulder"]
+    l_upleg = in_frame(hips, xp, yp, zp, REST["l_upleg"] - REST["hips"])
+    r_upleg = in_frame(hips, xp, yp, zp, REST["r_upleg"] - REST["hips"])
+
+    l_elbow = l_arm + seg(mp, i, "left_shoulder", "left_elbow") * LEN["l_arm"]
+    l_wrist = l_elbow + seg(mp, i, "left_elbow", "left_wrist") * LEN["l_fore"]
+    r_elbow = r_arm + seg(mp, i, "right_shoulder", "right_elbow") * LEN["r_arm"]
+    r_wrist = r_elbow + seg(mp, i, "right_elbow", "right_wrist") * LEN["r_fore"]
+    if body is not None:
+        l_hand = l_wrist + unit(B("left_middle1") - B("left_wrist_x")) * LEN["l_hand"]
+        r_hand = r_wrist + unit(B("right_middle1") - B("right_wrist_x")) * LEN["r_hand"]
+    else:
+        l_hand = l_wrist + seg(mp, i, "left_wrist", "left_index") * LEN["l_hand"]
+        r_hand = r_wrist + seg(mp, i, "right_wrist", "right_index") * LEN["r_hand"]
+
+    l_knee = l_upleg + seg(mp, i, "left_hip", "left_knee") * LEN["l_upleg"]
+    l_ankle = l_knee + seg(mp, i, "left_knee", "left_ankle") * LEN["l_leg"]
+    r_knee = r_upleg + seg(mp, i, "right_hip", "right_knee") * LEN["r_upleg"]
+    r_ankle = r_knee + seg(mp, i, "right_knee", "right_ankle") * LEN["r_leg"]
+    l_foot = l_ankle + seg(mp, i, "left_ankle", "left_foot_index") * LEN["l_foot"]
+    r_foot = r_ankle + seg(mp, i, "right_ankle", "right_foot_index") * LEN["r_foot"]
+    if body is not None:
+        l_fwd = unit(B("left_big_toe") - B("left_foot_x"))
+        r_fwd = unit(B("right_big_toe") - B("right_foot_x"))
+    else:
+        l_fwd = unit(mp["left_foot_index"][i] - mp["left_heel"][i])
+        r_fwd = unit(mp["right_foot_index"][i] - mp["right_heel"][i])
+    if np.linalg.norm(l_fwd) < 0.1:
+        l_fwd = -y
+    if np.linalg.norm(r_fwd) < 0.1:
+        r_fwd = -y
+    l_toe = l_foot + l_fwd * 0.10
+    r_toe = r_foot + r_fwd * 0.10
+
+    out = {
+        "hips": hips, "spine": spine, "spine1": spine1, "spine2": spine2,
+        "neck": neck, "head": head,
+        "l_shoulder": l_shoulder, "l_arm": l_arm, "l_elbow": l_elbow,
+        "l_wrist": l_wrist, "l_hand": l_hand,
+        "r_shoulder": r_shoulder, "r_arm": r_arm, "r_elbow": r_elbow,
+        "r_wrist": r_wrist, "r_hand": r_hand,
+        "l_upleg": l_upleg, "l_knee": l_knee, "l_ankle": l_ankle,
+        "l_foot": l_foot, "l_toe": l_toe,
+        "r_upleg": r_upleg, "r_knee": r_knee, "r_ankle": r_ankle,
+        "r_foot": r_foot, "r_toe": r_toe,
+        "basis_x": x, "basis_y": y, "basis_z": z,
+        "pelvis_x": xp, "pelvis_y": yp, "pelvis_z": zp,
+        "chest_x": xc, "chest_y": yc, "chest_z": zc,
+    }
+    if body is not None:
+        out["neck_up"] = unit(head - neck)
+        out["l_hand_lat"] = unit(B("left_pinky1") - B("left_index1"))
+        out["r_hand_lat"] = unit(B("right_pinky1") - B("right_index1"))
+    return out
 
 
 def _ramp(x, lo, hi):
@@ -526,6 +666,19 @@ def main():
 
     mp = {n: np.stack([mp_to_mix(p) for p in world[n]]) for n in world}
     mp = resample(times, mp, dst_times)
+    # Torso model. "twist" (default): pelvis from the hip line, chest from
+    # the shoulder/collar line, the twist spread over the spine, and — when
+    # the landmarks carry the estimator's `body` block — a spine that
+    # bends, real clavicles, hand roll and toe tips (reconstruct_twist).
+    # "rigid": the original single torso frame (reconstruct), for clips
+    # signed off before this existed.
+    torso = spec.get("torso", "twist")
+    if torso not in ("twist", "rigid"):
+        raise SystemExit(f"unknown torso {torso!r} (expected 'twist' or 'rigid')")
+    body = None
+    if torso == "twist" and aux["body"] is not None:
+        body = resample(times, {n: np.stack([mp_to_mix(p) for p in arr]) for n, arr in aux["body"].items()},
+                        dst_times)
     if len(pelvis_h) >= 7:
         pelvis_h = savgol_filter(pelvis_h, 7, 2, mode="interp")
     pelvis_h = np.interp(dst_times, times, pelvis_h)
@@ -638,7 +791,7 @@ def main():
     for i in range(n_dst):
         f = i + 1
         sf = 1 + (f - 1) * fps / dst_fps  # dest -> src frame (float)
-        rec = reconstruct(mp, i)
+        rec = reconstruct_twist(mp, i, body) if torso == "twist" else reconstruct(mp, i)
 
         # Authored arm overrides (spec): pull a whole arm chain to
         # hip-local targets — for beats where the owner's read of the
@@ -788,6 +941,13 @@ def main():
                     if abs(a_yaw) > 1e-5:
                         v = rodrigues(v, up, a_yaw)
                     rec[k] = sock + v
+                if f"{s}_hand_lat" in rec:        # the hand's roll turns with the arm
+                    d = np.asarray(rec[f"{s}_hand_lat"], float)
+                    if abs(a_pitch) > 1e-5:
+                        d = rodrigues(d, lat, a_pitch)
+                    if abs(a_yaw) > 1e-5:
+                        d = rodrigues(d, up, a_yaw)
+                    rec[f"{s}_hand_lat"] = d
 
         # Windowed leg-chain rotation (spec "leg_pose"): rotate a whole
         # leg rigidly about its hip socket so the foot rises (or drops) by
@@ -929,6 +1089,10 @@ def main():
                 head_level = max(head_level, float(hl["level_face"]) * win)
                 head_level_target = float(hl.get("level_target_deg", 0.0))
             rec["head"] = neck + v
+        if "neck_up" in rec:
+            # The neck aims along the lifted neck->head direction, so a
+            # head_look correction to the head carries through.
+            rec["neck_up"] = unit(np.asarray(rec["head"], float) - np.asarray(rec["neck"], float))
 
         rest_amt = smoother((sf - rb["start_src"]) / max(1.0, rb["full_src"] - rb["start_src"]))
         rbs = spec.get("rest_blend_start")
@@ -939,8 +1103,9 @@ def main():
             rest_amt = max(rest_amt, start_amt)
         if rest_amt > 0.0:
             rec = blend_pose(rec, rest, rest_amt)
-            for k in ("basis_x", "basis_y", "basis_z"):
-                rec[k] = unit(np.asarray(rec[k], float))
+            for k in rec:
+                if is_dir(k):
+                    rec[k] = unit(np.asarray(rec[k], float))
 
         fist = window_amount(f, spec["fists"]["rise_src"], spec["fists"]["fall_src"], src2dest)
         recs.append(rec)

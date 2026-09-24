@@ -53,6 +53,12 @@ Each frame also carries three signals GVHMR computes anyway:
   estimator's guess (docs/PITFALLS.md #7).
 - `pelvis_height_incam` — the pelvis height measured in the camera frame,
   projected on gravity (see section 11).
+- `body` — skeleton points MediaPipe-33 has no names for: the SMPL spine
+  column (spine1/2/3, neck, head) and collars, and from SMPL-X — the model
+  GVHMR actually poses — the knuckles (index/middle/pinky/thumb bases),
+  toe tips and heels, with that model's own wrist and foot joints. Same
+  convention as `world`. They are what lets the lift bend the spine,
+  split the twist between pelvis and chest, and roll the forearms (4.1).
 
 ## 2. Numeric beat sheet — BEFORE any spec
 
@@ -263,6 +269,38 @@ bone lengths from the Mixamo sockets. No IK. Read the QA lines it
 prints (one per `qa_src_frames`): rest/fist amounts, plant, yaw, key
 positions. Sanity: rest frames print the exact Y Bot rest
 (`lw=[0.73777, 0.06171, 1.43572]`).
+
+### 4.1 Torso and hands
+
+`"torso": "twist"` (default) gives the character a pelvis and a chest:
+
+- the Hips follow the **hip line**, the chest follows the **collar line**
+  (the shoulder line on landmarks without a `body` block), and the solver
+  spreads the twist between them over Spine / Spine1 / Spine2. The legs
+  hang off the pelvis and the arms off the chest;
+- with the `body` block, the spine follows the performer's own spine
+  joints — it bends instead of tilting the pelvis — the clavicles follow
+  the collars, the neck aims along the real neck, each hand points at its
+  middle knuckle and takes its **roll** from the index-to-pinky line
+  (the solver gives the forearm half of it — `"forearm_roll_share"`,
+  default 0.5 — since Mixamo has no twist bones), and the toes point at the
+  real toe tips.
+
+Measured on a synthetic performer with a known pose (shoulders turned
+45 degrees over square hips, a 30-degree spine flexion, an 80-degree
+forearm supination):
+
+| | `rigid` | `twist` (old landmarks) | `twist` + `body` |
+|---|---|---|---|
+| pelvis yaw / chest yaw | 39 / 39 (truth 0 / 45) | 0 / 44.9 | 0 / 45.0 |
+| pelvis tilt / chest tilt | 15.1 / 15.2 (truth 0 / 30) | 15.1 / 15.1 | 0.0 / 30.0 |
+| hand roll error | 152.8 | 152.8 | 0.0 |
+| toe direction error | 33.0 | 33.0 | 0.0 |
+
+`"torso": "rigid"` is the original single torso frame: combined with
+`"pin": "single"` it reproduces the lift from before either change byte
+for byte, for clips signed off earlier. The correctors (`arm_overrides`,
+`arm_pose`, `head_look`) keep working in the frame they were sized in.
 
 ## 5. Apply (inside live Blender)
 

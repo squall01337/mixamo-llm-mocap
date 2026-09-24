@@ -134,7 +134,10 @@ def main() -> None:
     def metrics_app(f):
         la, ra = bone(f, "mixamorig:LeftArm"), bone(f, "mixamorig:RightArm")
         shm = 0.5 * (la + ra)
-        fwd = np.array(curves[f - 1].get("body_forward", [0, -1, 0]), dtype=float)
+        # The reference frame is built from the SHOULDERS; so is this one
+        # (chest_forward). With a twisting spine the pelvis faces elsewhere.
+        fwd = np.array(curves[f - 1].get("chest_forward", curves[f - 1].get("body_forward", [0, -1, 0])),
+                       dtype=float)
         fwd[2] = 0.0
         fwd = unit(fwd)
         left = np.array([-fwd[1], fwd[0], 0.0])

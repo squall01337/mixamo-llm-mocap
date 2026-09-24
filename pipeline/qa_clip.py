@@ -206,7 +206,7 @@ def main():
     #    the sky, passes them all.
     if "face_dir" in frames[0]:
         face = np.array([f["face_dir"] for f in frames], dtype=float)
-        body = np.array([f["body_forward"] for f in frames], dtype=float)
+        body = np.array([f.get("chest_forward", f["body_forward"]) for f in frames], dtype=float)
         fy = np.degrees(np.arctan2(face[:, 0], -face[:, 1]))
         by = np.degrees(np.arctan2(body[:, 0], -body[:, 1]))
         elev = np.degrees(np.arcsin(np.clip(face[:, 2], -1, 1)))

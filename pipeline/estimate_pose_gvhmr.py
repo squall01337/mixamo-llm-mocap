@@ -91,6 +91,22 @@ J = {
 FACE_VERTS = {"nose": 332, "left_eye": 2800, "right_eye": 6260,
               "left_ear": 583, "right_ear": 4071}
 
+# The `body` block: skeleton points the MediaPipe-33 set has no names for,
+# which the lift needs to stop guessing the torso and the hands.
+#   SMPL 24 (same regressor as every other joint here): the spine column
+#   and the collars — the pelvis-to-chest twist and the spine's bend.
+#   SMPL-X (the model GVHMR actually poses; smplx package joint order): the
+#   knuckles, which carry the wrist's real orientation — the hand's roll —
+#   and the toe tips, with their own wrist/foot joints so every direction
+#   is taken within one model.
+BODY_SMPL = {"spine1": 3, "spine2": 6, "spine3": 9, "neck": 12, "head": 15,
+             "left_collar": 13, "right_collar": 14}
+BODY_SMPLX = {"left_wrist_x": 20, "right_wrist_x": 21,
+              "left_index1": 25, "left_middle1": 28, "left_pinky1": 31, "left_thumb1": 37,
+              "right_index1": 40, "right_middle1": 43, "right_pinky1": 46, "right_thumb1": 52,
+              "left_foot_x": 10, "right_foot_x": 11,
+              "left_big_toe": 60, "left_heel": 62, "right_big_toe": 63, "right_heel": 65}
+
 # GVHMR's per-frame "static" confidence (`static_conf_logits`), in the
 # network's own joint order (hmr4d/model/gvhmr/utils/postprocess.py). It is
 # trained to fire when a joint moves slower than 0.15 m/s: a planted foot, a
@@ -424,16 +440,20 @@ def smpl_joints(pred: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     face_idx = torch.tensor(list(FACE_VERTS.values()))
 
+    smplx_idx = torch.tensor(list(BODY_SMPLX.values()))
+
     def joints_of(params: dict, want_face: bool = False):
         with torch.no_grad():
-            verts = smplx(**to_cuda(params)).vertices  # (L, Vx, 3)
+            out = smplx(**to_cuda(params))
+            verts = out.vertices  # (L, Vx, 3)
+            jx = out.joints[:, smplx_idx.to(verts.device)]  # (L, len(BODY_SMPLX), 3)
             verts = torch.stack([torch.matmul(smplx2smpl, v) for v in verts])  # (L, 6890, 3)
             joints = einsum(J_regressor, verts, "j v, l v i -> l j i")  # (L, 24, 3)
             if want_face:
-                return joints, verts[:, face_idx.to(verts.device)]  # (L, 5, 3)
+                return joints, verts[:, face_idx.to(verts.device)], jx  # (L, 5, 3)
             return joints
 
-    joints_ay, face_ay = joints_of(pred["smpl_params_global"], want_face=True)
+    joints_ay, face_ay, smplx_ay = joints_of(pred["smpl_params_global"], want_face=True)
 
     # Same normalization as GVHMR render_global: frame-0 pelvis to the
     # origin (XZ), ground to y=0, then rotate so frame 0 faces +z.
@@ -441,14 +461,16 @@ def smpl_joints(pred: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     offset[1] = joints_ay[:, :, 1].min()
     joints_ay = joints_ay - offset
     face_ay = face_ay - offset
+    smplx_ay = smplx_ay - offset
     T_ay2ayfz = compute_T_ayfz2ay(joints_ay[[0]], inverse=True)
     joints_ayfz = apply_T_on_points(joints_ay, T_ay2ayfz)
     face_ayfz = apply_T_on_points(face_ay, T_ay2ayfz)
+    smplx_ayfz = apply_T_on_points(smplx_ay, T_ay2ayfz)
 
-    joints_incam, face_incam = joints_of(pred["smpl_params_incam"], want_face=True)
+    joints_incam, face_incam, _ = joints_of(pred["smpl_params_incam"], want_face=True)
     K = pred["K_fullimg"][0].cpu().numpy()
     return (joints_ayfz.cpu().numpy(), joints_incam.cpu().numpy(), K,
-            face_ayfz.cpu().numpy(), face_incam.cpu().numpy())
+            face_ayfz.cpu().numpy(), face_incam.cpu().numpy(), smplx_ayfz.cpu().numpy())
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +632,7 @@ def main() -> None:
 
     res = run_gvhmr(video, args.person, args.postproc, args.fresh)
     pred = res["pred"]
-    joints_ayfz, joints_incam, K, face_ayfz, face_incam = smpl_joints(pred)
+    joints_ayfz, joints_incam, K, face_ayfz, face_incam, smplx_ayfz = smpl_joints(pred)
     L = joints_ayfz.shape[0]
     ph_incam = incam_pelvis_height(joints_ayfz, joints_incam)
     # Signals GVHMR computes and this script used to throw away:
@@ -655,7 +677,15 @@ def main() -> None:
                "incam_root": [round(float(x), 5) for x in incam_pelvis],
                "gaze": [round(float(x), 5) for x in gaze],
                "static": {n: round(float(static[i, k]), 4) for k, n in enumerate(STATIC_JOINTS)},
-               "image": {}, "world": {}, "incam": {}}
+               "image": {}, "world": {}, "incam": {}, "body": {}}
+        # Extra skeleton points, same convention as `world` (hip-centred,
+        # y down, z toward camera negative), as [x, y, z].
+        for n, k in BODY_SMPL.items():
+            b = ayfz_to_mp(joints_ayfz[i][k]) - hip_mid
+            rec["body"][n] = [round(float(x), 6) for x in b]
+        for k, n in enumerate(BODY_SMPLX):
+            b = ayfz_to_mp(smplx_ayfz[i][k]) - hip_mid
+            rec["body"][n] = [round(float(x), 6) for x in b]
         for n in MP_NAMES:
             w = mp_world[n] - hip_mid  # per-frame mid-hip centered
             im = project(mp_img[n], K, wh)

@@ -562,12 +562,15 @@ def solve(frames: list, spec: dict, skel: Skeleton) -> dict:
     I = skel.idx
     hips, head_i = I["mixamorig:Hips"], I["mixamorig:Head"]
     rest_ax = rest_axes(skel)
+    chest_i = I.get("mixamorig:Spine2", hips)
+    chest_fwd_local = P.pm(chest_i)[:3, :3].T @ P.dir_to_arm(np.array([0.0, -1.0, 0.0]))
     n_b, n_f = len(skel.names), len(frames)
     Q = np.zeros((n_f, n_b, 4))
     LOC = np.zeros((n_f, n_b, 3))
     WORLD = np.zeros((n_f, n_b, 3))
     FACE = np.zeros((n_f, 3))
     FWD = np.zeros((n_f, 3))
+    CHEST = np.zeros((n_f, 3))
 
     def v(k, fr):
         return np.asarray(fr[k], float)
@@ -589,10 +592,17 @@ def solve(frames: list, spec: dict, skel: Skeleton) -> dict:
         hips_w = v("hips", fr)
         loc_x, loc_z = hips_w[0] * 100.0, -hips_w[1] * 100.0
         hint = (hips_w[2] - HIP_HEIGHT) * 100.0
-        up = v("neck_up", fr) if "neck_up" in fr else v("basis_z", fr)
+        # With a bending spine (`neck_up`, from the estimator's own neck
+        # joints) the neck and head aim along that direction from wherever
+        # the spine put them; otherwise along the torso's up, from the
+        # lifted neck point, with the lifted head's small horizontal offset.
+        along_neck = "neck_up" in fr
+        up = v("neck_up", fr) if along_neck else v("basis_z", fr)
         neck_p = v("neck", fr)
         head_flat = v("head", fr) - neck_p
         head_flat[2] = 0.0
+        if along_neck:
+            head_flat[:] = 0.0
         pitch = math.radians(float(fr.get("head_pitch_deg", 0.0) or 0.0))
         lateral = v("basis_x", fr)
         for bone, key in AIM:
@@ -602,12 +612,12 @@ def solve(frames: list, spec: dict, skel: Skeleton) -> dict:
                 aim = up * 0.11 + head_flat * 0.25
                 if pitch:
                     aim = q_to_mat3(axis_angle_to_quat(lateral, pitch * 0.35)) @ aim
-                aim_bone(P, I[bone], neck_p + aim)
+                aim_bone(P, I[bone], (P.world_loc(I[bone]) if along_neck else neck_p) + aim)
             elif bone == "mixamorig:Head":
                 aim = up * 0.28 + head_flat * 0.15
                 if pitch:
                     aim = q_to_mat3(axis_angle_to_quat(lateral, pitch)) @ aim
-                aim_bone(P, I[bone], neck_p + aim)
+                aim_bone(P, I[bone], (P.world_loc(I[bone]) if along_neck else neck_p) + aim)
             else:
                 aim_bone(P, I[bone], v(key, fr))
             if bone == "mixamorig:Spine2" and "chest_x" in fr:
@@ -659,6 +669,7 @@ def solve(frames: list, spec: dict, skel: Skeleton) -> dict:
             WORLD[t, b] = P.world_loc(b)
         FACE[t] = _face_dir(P, head_i)
         FWD[t] = unit((skel.world3 @ P.pm(hips)[:3, :3]) @ np.array([0.0, 0.0, 1.0]))
+        CHEST[t] = unit(skel.world3 @ (P.pm(chest_i)[:3, :3] @ chest_fwd_local))
 
     # One hemisphere per bone: q and -q are the same rotation, but keys that
     # flip between them interpolate through garbage (a 360-degree spin
@@ -667,7 +678,7 @@ def solve(frames: list, spec: dict, skel: Skeleton) -> dict:
         flip = np.einsum("bi,bi->b", Q[t], Q[t - 1]) < 0.0
         Q[t, flip] *= -1.0
     return {"names": skel.names, "frames": [int(fr["frame"]) for fr in frames],
-            "q": Q, "loc": LOC, "world": WORLD, "face": FACE, "fwd": FWD}
+            "q": Q, "loc": LOC, "world": WORLD, "face": FACE, "fwd": FWD, "chest": CHEST}
 
 
 # ---------------------------------------------------------------------------
@@ -684,7 +695,8 @@ def curves_payload(sol: dict) -> dict:
                         "world_location": [round(float(x), 6) for x in sol["world"][t, b]]}
         out.append({"frame": f, "bones": bones,
                     "face_dir": [round(float(x), 5) for x in sol["face"][t]],
-                    "body_forward": [round(float(x), 5) for x in sol["fwd"][t]]})
+                    "body_forward": [round(float(x), 5) for x in sol["fwd"][t]],
+                    "chest_forward": [round(float(x), 5) for x in sol["chest"][t]]})
     return {"frames": out, "solver": "fk_solve"}
 
 

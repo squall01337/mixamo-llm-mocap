@@ -812,6 +812,13 @@ def dump_curves(spec_path: str) -> dict:
     # The clip's own length: scene.frame_end belongs to whichever clip was
     # applied last, which in a two-character scene may be the other one.
     end = int(round(act.frame_range[1]))
+    # The chest's forward, transported from rest: Spine2's rest-frame image
+    # of the character's forward (-Y), whatever that bone's roll is.
+    chest = arm.pose.bones.get("mixamorig:Spine2")
+    chest_fwd_local = None
+    if chest is not None:
+        fwd_arm = (arm.matrix_world.to_3x3().inverted() @ Vector((0.0, -1.0, 0.0))).normalized()
+        chest_fwd_local = chest.bone.matrix_local.to_3x3().transposed() @ fwd_arm
     out = []
     for f in range(1, end + 1):
         bpy.context.scene.frame_set(f)
@@ -830,9 +837,13 @@ def dump_curves(spec_path: str) -> dict:
                 @ Vector((0.0, 0.0, 1.0))).normalized()
         fwd = ((arm.matrix_world @ arm.pose.bones["mixamorig:Hips"].matrix).to_3x3()
                @ Vector((0.0, 0.0, 1.0))).normalized()
-        out.append({"frame": f, "bones": bones,
-                    "face_dir": [round(face.x, 5), round(face.y, 5), round(face.z, 5)],
-                    "body_forward": [round(fwd.x, 5), round(fwd.y, 5), round(fwd.z, 5)]})
+        rec = {"frame": f, "bones": bones,
+               "face_dir": [round(face.x, 5), round(face.y, 5), round(face.z, 5)],
+               "body_forward": [round(fwd.x, 5), round(fwd.y, 5), round(fwd.z, 5)]}
+        if chest_fwd_local is not None:
+            cf = ((arm.matrix_world @ chest.matrix).to_3x3() @ chest_fwd_local).normalized()
+            rec["chest_forward"] = [round(cf.x, 5), round(cf.y, 5), round(cf.z, 5)]
+        out.append(rec)
     clip_dir = rpath(spec["clip_dir"])
     (clip_dir / "curves.json").write_text(json.dumps({"frames": out}), encoding="utf-8")
     return {"curves_frames": len(out)}
