@@ -136,11 +136,23 @@ above before it goes into the spec.
 What each support does in the FK apply:
 - `left`/`right`: hip height searched so that foot lands at 0.105 m;
   the foot is flattened (Z-only, keeps estimator XZ and its own
-  heading); the lift also **pins the support ankle's XZ** for the whole
-  window (the pose translates so the planted foot never skates; the
-  correction decays over 10 frames after the window).
-- `both`: plant the lower foot, flatten both if near ground. Feet may
-  genuinely step inside a `both` window — that is fine.
+  heading); the lift also **pins the support foot** for the whole window
+  (the pose translates so the planted foot never skates).
+- `both`: plant the lower foot, flatten both if near ground. The lift
+  pins each foot that is actually planted — near the floor and, when the
+  landmarks carry GVHMR's `static` confidence, not moving — so the pelvis
+  sways over planted feet instead of the feet sliding under a still
+  pelvis. Feet may genuinely step inside a `both` window: a foot that
+  lifts lets go and plants again where it lands, and one that slides
+  while the other holds still is judged the moving one.
+
+Pinning is spec field `"pin"`: `"contacts"` (default, the above) or
+`"single"` (the original rule: support ankle in single-support windows
+only, released over 10 frames, `both` windows left sliding —
+docs/PITFALLS.md #40). The travel pinning builds is carried through
+flight and eased back to the stage mark over the closing rest blend, so an
+in-place clip still ends where it started. Clips with `root_motion` are
+not pinned either way (section 9.3).
 - `none`: no plant, no snapping; hip height integrates the estimator's
   `pelvis_height` arc from the last planted frame (continuous takeoff,
   ballistic flight). Landing pops are caught by QA's hip-step check.

@@ -274,5 +274,7 @@ touching a clip a human has partially signed off.
     shift (feet fixed in the ground truth, pelvis ±8 cm) came out with
     the feet sliding over a 16 cm range, and the verdict was PASS. The
     frames right after a pinned window slide too, while the pin's offset
-    decays. `qa_clip.py` now reports grounded skate over the whole clip.
-    Read those runs before trusting a `both` window.
+    decays. `qa_clip.py` now reports grounded skate over the whole clip,
+    and the lift pins every planted foot, not only the single-support
+    one (`pin: "contacts"`, the default): on the same weight shift the
+    feet now hold within 1 mm and the pelvis sways its 16 cm.

@@ -19,12 +19,14 @@ contributes only what the estimator cannot know:
 
 Two structural jobs happen here rather than in the FK apply:
 
-  - support-ankle pinning: the estimator world is per-frame hip-centered,
-    so a planted foot drifts while the body leans. During single-support
-    windows the WHOLE pose is translated so the support ankle stays where
-    it touched down (the pelvis then sways over the planted foot, which
-    is the correct physics). The correction decays over 10 frames after
-    the window.
+  - foot pinning: the estimator world is per-frame hip-centered, so a
+    planted foot drifts whenever the body moves over it. The WHOLE pose is
+    translated so every planted foot stays where it touched down (the
+    pelvis then sways over the feet, which is the correct physics) — in
+    single-support windows and, since `pin: "contacts"`, in `both` windows
+    too, judged per foot from the support schedule, the foot heights and
+    the estimator's static confidence. `pin: "single"` restores the old
+    rule (support ankle only, released over 10 frames).
   - hips world Z stays at rest height; the FK apply searches the real
     hip height per frame so the support foot plants at ground level —
     that is what makes crouches and wide stances drop the pelvis. For
@@ -131,6 +133,20 @@ MP_USED = [
 
 HIP_Z = float(REST["hips"][2])
 
+# Per-frame keys of a lifted pose that are DIRECTIONS, not positions: they
+# must never be translated (pinning, root motion, stage placement).
+DIR_PREFIXES = ("basis_", "pelvis_", "chest_")
+DIR_KEYS = {"neck_up", "l_hand_lat", "r_hand_lat"}
+
+STATIC_KEYS = ("left_ankle", "left_foot_index", "right_ankle", "right_foot_index")
+PIN_LAMBDA = 0.02   # pull of "keep the previous offset" against the planted contacts
+PIN_W_MIN = 0.02    # below this weight a contact point is released
+PIN_TOL = 0.01      # metres two planted feet may disagree before one is judged moving
+
+
+def is_dir(k: str) -> bool:
+    return k.startswith(DIR_PREFIXES) or k in DIR_KEYS
+
 
 def rpath(p) -> Path:
     p = Path(p)
@@ -183,6 +199,9 @@ def load_mp(path: Path):
     # Ground trajectory, two independent estimates (see main()).
     root = np.zeros((len(frames), 2))
     incam = np.zeros((len(frames), 3))
+    # GVHMR's own "this joint is not moving" probability per foot point
+    # (current estimator only): the evidence contact pinning weighs.
+    static = {k: np.full(len(frames), np.nan) for k in STATIC_KEYS}
     for i, f in enumerate(frames):
         times[i] = f["t"]
         pelvis_h[i] = float(f.get("pelvis_height", 0.0))
@@ -197,10 +216,14 @@ def load_mp(path: Path):
         ic = f.get("incam_root")
         if ic:
             incam[i] = ic
+        for k in STATIC_KEYS:
+            if k in f.get("static", {}):
+                static[k][i] = float(f["static"][k])
         for n in MP_USED:
             w = f["world"][n]
             world[n][i] = (w["x"], w["y"], w["z"])
-    return data["fps"], times, world, pelvis_h, gaze, root, incam, pelvis_h_incam
+    aux = {"static": None if any(np.isnan(v).any() for v in static.values()) else static}
+    return data["fps"], times, world, pelvis_h, gaze, root, incam, pelvis_h_incam, aux
 
 
 def resample(times, series, dst_times):
@@ -355,6 +378,106 @@ def reconstruct(mp, i):
     }
 
 
+def _ramp(x, lo, hi):
+    """0 at `lo`, 1 at `hi`, smooth in between."""
+    return smoother((x - lo) / (hi - lo))
+
+
+def contact_weights(plant, h_ankle, h_ball, static=None) -> dict:
+    """How planted each foot point is, per destination frame.
+
+    `plant` is the spec's support per frame; `h_ankle`/`h_ball` the
+    performer's ankle and ball heights above the floor ({"l": arr, "r": arr});
+    `static` GVHMR's per-point "not moving" probability, when the landmarks
+    carry it. Returns {("l"|"r", "ankle"|"ball"): weights}.
+
+    - The spec's single-support foot is planted, full stop (it always was).
+    - In `both` windows each foot is judged on its own: near the floor
+      (ankle under 0.12 m or ball under 0.06 m, fading out by 0.20 / 0.12),
+      and — when the estimator says so — not moving. A foot that steps
+      inside a `both` window lifts, lets go of its anchor, and plants again
+      where it lands.
+    - Within a foot, the estimator's static split says whether the heel or
+      the ball holds (a pivot keeps the ball down while the heel turns);
+      without it, the ankle holds, as the old single-support pin did.
+    """
+    n = len(plant)
+    W = {(s, p): np.zeros(n) for s in "lr" for p in ("ankle", "ball")}
+    for i in range(n):
+        for s, side in (("l", "left"), ("r", "right")):
+            sup = plant[i]
+            if sup == "none" or (sup in ("left", "right") and sup != side):
+                continue
+            if sup == side:
+                c = 1.0
+            else:
+                c = max(1.0 - _ramp(h_ankle[s][i], 0.12, 0.20), 1.0 - _ramp(h_ball[s][i], 0.06, 0.12))
+                if static is not None:
+                    c *= _ramp(max(static[s, "ankle"][i], static[s, "ball"][i]), 0.3, 0.7)
+            share = 1.0
+            if static is not None:
+                sa, sb = static[s, "ankle"][i], static[s, "ball"][i]
+                share = 0.5 if sa + sb < 0.1 else sa / (sa + sb)
+            W[s, "ankle"][i] = c * share
+            W[s, "ball"][i] = c * (1.0 - share)
+    return W
+
+
+def pin_offsets(recs, W, lam=PIN_LAMBDA) -> np.ndarray:
+    """Horizontal offset per frame that keeps every planted foot point on
+    the spot where it touched down.
+
+    Each point takes an anchor when its weight rises (its world position at
+    that moment, so a new contact never jerks the body) and drops it when
+    the weight falls. The offset is the weighted least-squares fit of all
+    live anchors, plus a small pull toward the previous frame's offset,
+    which carries it through flight and eases contacts in and out. With
+    hip-centred landmarks this is what puts the pelvis over the feet: the
+    body moves, the planted feet do not.
+    """
+    pts = {("l", "ankle"): "l_ankle", ("l", "ball"): "l_foot",
+           ("r", "ankle"): "r_ankle", ("r", "ball"): "r_foot"}
+    out = np.zeros((len(recs), 2))
+    delta = np.zeros(2)
+    anchors = {}
+    for i, rec in enumerate(recs):
+        live = {}
+        for key, joint in pts.items():
+            w = float(W[key][i])
+            if w <= PIN_W_MIN:
+                anchors.pop(key, None)
+                continue
+            p = np.asarray(rec[joint], float)[:2]
+            if key not in anchors:
+                anchors[key] = p + delta
+            live[key] = (w, p)
+        # A foot that moves while nominally planted (a kick starting inside a
+        # `both` window, a shuffle — frequent when no static confidence says
+        # otherwise) shows up as the two feet asking for different offsets.
+        # Averaging them would slide BOTH feet and snap when one lets go:
+        # the one asking for the bigger change is the one moving, so it is
+        # re-anchored where it stands and the other foot holds the body.
+        implied = {}
+        for s in "lr":
+            ks = [k for k in live if k[0] == s]
+            if ks:
+                ws = sum(live[k][0] for k in ks)
+                implied[s] = sum(live[k][0] * (anchors[k] - live[k][1]) for k in ks) / ws
+        if len(implied) == 2 and np.linalg.norm(implied["l"] - implied["r"]) > PIN_TOL:
+            moving = max("lr", key=lambda s: float(np.linalg.norm(implied[s] - delta)))
+            keep = "r" if moving == "l" else "l"
+            for k in live:
+                if k[0] == moving:
+                    anchors[k] = live[k][1] + implied[keep]
+        num, den = lam * delta, lam
+        for k, (w, p) in live.items():
+            num = num + w * (anchors[k] - p)
+            den += w
+        delta = num / den
+        out[i] = delta
+    return out
+
+
 def window_amount(dest_f, rise, fall, src2dest):
     """1 inside [rise..fall] windows given in src frames, smooth edges."""
     r0, r1 = src2dest(rise[0]), src2dest(rise[1])
@@ -382,7 +505,7 @@ def main():
     global PREFILTER
     PREFILTER = int(spec.get("prefilter_window", PREFILTER))
 
-    fps, times, world, pelvis_h, gaze_src, root_src, incam_src, pelvis_h_incam = load_mp(rpath(spec["landmarks"]))
+    fps, times, world, pelvis_h, gaze_src, root_src, incam_src, pelvis_h_incam, aux = load_mp(rpath(spec["landmarks"]))
     # Which estimate of the pelvis arc the airborne (`none`) windows
     # integrate. "global" (default) is GVHMR's gravity-aligned trajectory,
     # the source that under-reported the duel's step-in (0.68 m for 0.92 m);
@@ -853,19 +976,47 @@ def main():
                 blend = smoother(t)
                 recs[f - 1][k] = series[j] * (1.0 - blend) + smoothed[j] * blend
 
-    # Support-ankle pinning (see module docstring).
+    # Foot pinning (see module docstring).
     #
     # The skate this corrects is an ARTEFACT of hip-centred landmarks:
     # with the body's travel discarded, a planted foot appears to slide
-    # backwards whenever the pelvis leans over it. When `root_motion`
-    # restores that travel the artefact is gone at the source, and
-    # re-pinning on top would fight the real trajectory — cancelling the
-    # step inside every stance and then snapping it back as the window
-    # released. QA's single-support check measures what is left.
+    # whenever the pelvis moves over it. When `root_motion` restores that
+    # travel the artefact is gone at the source, and re-pinning on top
+    # would fight the real trajectory — cancelling the step inside every
+    # stance and then snapping it back as the window released.
+    #
+    # "contacts" (default) pins every planted foot, in `both` windows too,
+    # from the spec's support schedule, the performer's foot heights and
+    # the estimator's per-foot static confidence (contact_weights). The
+    # offset it builds is the pelvis travelling over the feet; it is carried
+    # through flight and eased back to the stage mark as the closing rest
+    # blend comes in, so the clip still ends where it started.
+    # "single" is the original rule: pin the support ankle in single-support
+    # windows only, release over 10 frames — which left planted feet
+    # sliding in every `both` window (docs/PITFALLS.md #40).
+    pin_mode = spec.get("pin", "contacts")
+    if pin_mode not in ("contacts", "single"):
+        raise SystemExit(f"unknown pin mode {pin_mode!r} (expected 'contacts' or 'single')")
     RELEASE = 10
-    pos_keys = [k for k in recs[0] if not k.startswith("basis_")]
+    pos_keys = [k for k in recs[0] if not is_dir(k)]
+    if pin_mode == "contacts" and not root_motion:
+        h_ankle = {s: pelvis_h + (mp[f"{side}_ankle"][:, 2] - HIP_Z) for s, side in (("l", "left"), ("r", "right"))}
+        h_ball = {s: pelvis_h + (mp[f"{side}_foot_index"][:, 2] - HIP_Z) for s, side in (("l", "left"), ("r", "right"))}
+        st = None
+        if aux["static"] is not None:
+            st = {}
+            for s, side in (("l", "left"), ("r", "right")):
+                st[s, "ankle"] = np.interp(dst_times, times, aux["static"][f"{side}_ankle"])
+                st[s, "ball"] = np.interp(dst_times, times, aux["static"][f"{side}_foot_index"])
+        W = contact_weights([ex["plant"] for ex in extras], h_ankle, h_ball, st)
+        offs = pin_offsets(recs, W)
+        for i, rec in enumerate(recs):
+            d = offs[i] * (1.0 - float(extras[i]["rest"]))
+            for k in pos_keys:
+                rec[k] = np.asarray(rec[k], float)
+                rec[k][:2] += d
     for a_src, b_src, sup in plant_windows:
-        if sup not in ("left", "right") or root_motion:
+        if pin_mode != "single" or sup not in ("left", "right") or root_motion:
             continue
         a = max(1, int(round(src2dest(a_src))))
         b = min(n_dst, int(round(src2dest(b_src))))
