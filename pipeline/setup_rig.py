@@ -76,6 +76,94 @@ PROFILE_LENGTHS = {
 }
 
 
+# Collision capsules measured on the character's own mesh (compare_pair.py).
+# part -> (segment start, segment end, bones whose skin belongs to it). The
+# torso axis runs from the hips to the MID-SHOULDER line and the head is a
+# sphere at the skull centre — the same proxies compare_pair builds, so the
+# radii mean what the comparison assumes (docs/PITFALLS.md #29).
+CAPSULE_PARTS = {
+    "torso": ("mixamorig:Hips", "shoulder_mid", ("Hips", "Spine", "Spine1", "Spine2")),
+    "head": ("skull", "skull", ("Head", "HeadTop_End")),
+}
+for _s, _S in (("l", "Left"), ("r", "Right")):
+    CAPSULE_PARTS.update({
+        f"{_s}_upperarm": (f"mixamorig:{_S}Arm", f"mixamorig:{_S}ForeArm", (f"{_S}Arm",)),
+        f"{_s}_forearm": (f"mixamorig:{_S}ForeArm", f"mixamorig:{_S}Hand", (f"{_S}ForeArm",)),
+        f"{_s}_hand": (f"mixamorig:{_S}Hand", f"mixamorig:{_S}HandMiddle1", (f"{_S}Hand",)),
+        f"{_s}_thigh": (f"mixamorig:{_S}UpLeg", f"mixamorig:{_S}Leg", (f"{_S}UpLeg",)),
+        f"{_s}_shin": (f"mixamorig:{_S}Leg", f"mixamorig:{_S}Foot", (f"{_S}Leg",)),
+        f"{_s}_foot": (f"mixamorig:{_S}Foot", f"mixamorig:{_S}Toe_End", (f"{_S}Foot", f"{_S}ToeBase")),
+    })
+
+
+def measure_capsules(arm) -> dict:
+    """Radius of each body part, measured on the skinned mesh at rest.
+
+    compare_pair.py's contact proxies used fixed human-sized radii (torso
+    0.16 m, head 0.11 m, limbs zero), which scored a kick as clearing by 4 mm
+    while the meshes intersected (docs/PITFALLS.md #33). Here every mesh
+    vertex belongs to the bone with its largest skin weight, and each part's
+    radius is the 95th percentile of its vertices' distance to the part's
+    segment (the head: to the skull centre). Fingers count as hand.
+    """
+    import numpy as np
+
+    W = arm.matrix_world
+
+    def head(n):
+        # REST positions (the mesh's own coordinates are the bind pose), so
+        # this is right whatever pose or action the armature holds.
+        b = arm.data.bones.get(n)
+        return None if b is None else np.array(W @ b.head_local)
+
+    pts = {}
+    for part, (a, b, _) in CAPSULE_PARTS.items():
+        if part == "torso":
+            la, ra = head("mixamorig:LeftArm"), head("mixamorig:RightArm")
+            pa, pb_ = head(a), (None if la is None or ra is None else 0.5 * (la + ra))
+        elif part == "head":
+            h, t = head("mixamorig:Head"), head("mixamorig:HeadTop_End")
+            pa = pb_ = None if h is None else (h if t is None else 0.5 * (h + t))
+        else:
+            pa, pb_ = head(a), head(b)
+            if pb_ is None and pa is not None and part.endswith("_hand"):
+                fore = head(a.replace("Hand", "ForeArm"))
+                if fore is not None:
+                    pb_ = pa + (pa - fore) / max(np.linalg.norm(pa - fore), 1e-6) * 0.10
+        if pa is not None and pb_ is not None:
+            pts[part] = (pa, pb_)
+    owner = {}
+    for part, (_, _, bones) in CAPSULE_PARTS.items():
+        for bn in bones:
+            owner["mixamorig:" + bn] = part
+    for side in ("Left", "Right"):
+        for b in arm.pose.bones:
+            if b.name.startswith(f"mixamorig:{side}Hand") and b.name != f"mixamorig:{side}Hand":
+                owner[b.name] = f"{side[0].lower()}_hand"
+
+    dists = {part: [] for part in pts}
+    for o in bpy.data.objects:
+        if o.type != "MESH" or o.find_armature() is not arm:
+            continue
+        names = {g.index: g.name for g in o.vertex_groups}
+        mw = o.matrix_world
+        for v in o.data.vertices:
+            if not v.groups:
+                continue
+            g = max(v.groups, key=lambda e: e.weight)
+            part = owner.get(names.get(g.group, ""))
+            if part not in pts:
+                continue
+            p = np.array(mw @ v.co)
+            a, b = pts[part]
+            ab = b - a
+            t = 0.0 if float(ab @ ab) < 1e-12 else float(np.clip((p - a) @ ab / (ab @ ab), 0.0, 1.0))
+            dists[part].append(float(np.linalg.norm(p - (a + ab * t))))
+    return {part: {"radius": round(float(np.percentile(d, 95)), 4), "max": round(float(max(d)), 4),
+                   "vertices": len(d)}
+            for part, d in dists.items() if len(d) >= 8}
+
+
 def dump_rig_profile(arm, out_path: Path) -> dict:
     """Measure the character's rest geometry into rig_profile.json."""
     bpy.context.view_layer.update()
@@ -123,6 +211,8 @@ def dump_rig_profile(arm, out_path: Path) -> dict:
         # The rest skeleton (hierarchy + armature-space rest matrices), so
         # fk_solve.py can solve this character's clips outside Blender.
         "skeleton": fk_solve.Skeleton.from_blender(arm).to_profile(),
+        # This character's own thickness, for compare_pair.py's contact test.
+        "capsules": measure_capsules(arm),
     }
     out_path.write_text(json.dumps(profile, indent=1), encoding="utf-8")
     return profile

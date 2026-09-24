@@ -25,7 +25,11 @@ Three measurements, in the order they matter:
                   ~5 cm from it here.
   intrusion       absolute defect check: an extremity INSIDE the other
                   character's torso or head. No reference needed — it
-                  is wrong however the video looked.
+                  is wrong however the video looked. Limbs and bodies are
+                  capsules with each character's OWN radii, measured on
+                  its mesh by setup_rig.py (profile `capsules`); a profile
+                  without them falls back to thin limbs inside human-sized
+                  torso and head, which is optimistic (PITFALLS #33).
 
 Both performers are read in the estimator's CAMERA frame (`incam` in
 landmarks.json), the one frame two independently-estimated people
@@ -65,10 +69,13 @@ LIMBS = {
     "r_upperarm": ("mixamorig:RightArm", "mixamorig:RightForeArm"),
     "l_shin": ("mixamorig:LeftLeg", "mixamorig:LeftFoot"),
     "r_shin": ("mixamorig:RightLeg", "mixamorig:RightFoot"),
-    "l_foot": ("mixamorig:LeftFoot", "mixamorig:LeftToeBase"),
-    "r_foot": ("mixamorig:RightFoot", "mixamorig:RightToeBase"),
+    "l_foot": ("mixamorig:LeftFoot", "mixamorig:LeftToe_End"),     # ankle to toe tip
+    "r_foot": ("mixamorig:RightFoot", "mixamorig:RightToe_End"),
     "l_thigh": ("mixamorig:LeftUpLeg", "mixamorig:LeftLeg"),
     "r_thigh": ("mixamorig:RightUpLeg", "mixamorig:RightLeg"),
+    # the fist itself: wrist to knuckles
+    "l_hand": ("mixamorig:LeftHand", "mixamorig:LeftHandMiddle1"),
+    "r_hand": ("mixamorig:RightHand", "mixamorig:RightHandMiddle1"),
 }
 # Paired deliberately: Blender reports a bone's HEAD, so `mixamorig:*Hand`
 # is at the wrist — matching the performer's wrist landmark, not their
@@ -124,6 +131,8 @@ class Fighter:
         self.lm = json.loads(rpath(self.spec["landmarks"]).read_text(encoding="utf-8"))["frames"]
         prof = json.loads(rpath(self.spec.get("rig_profile", "rig_profile.json")).read_text(encoding="utf-8"))
         L = prof["lengths"]
+        # Mesh-fitted capsule radii (setup_rig.py), when the profile has them.
+        self.caps = {k: float(v["radius"]) for k, v in prof.get("capsules", {}).items()}
         self.arm = L["l_arm"] + L["l_fore"]
         self.leg = L["l_upleg"] + L["l_leg"]
         self.src_fps = float(self.spec.get("src_fps", 24))
@@ -136,6 +145,9 @@ class Fighter:
 
     def dest(self, sf: int) -> int:
         return int(round((sf - 1) * self.dst_fps / self.src_fps + 1))
+
+    def cap(self, part: str, default: float = 0.0) -> float:
+        return self.caps.get(part, default)
 
     def ref(self, i: int, n: str) -> np.ndarray:
         p = self.lm[i]["world"][n]
@@ -258,6 +270,14 @@ def main() -> None:
     n_src = min(len(A.lm), len(B.lm))
     print(f"pair: {A.name} vs {B.name} | stage scale {S:.4f} "
           f"({A.name} {A.scale:.4f}, {B.name} {B.scale:.4f})")
+    for f in (A, B):
+        if f.caps:
+            print(f"capsules {f.name}: measured on its mesh — torso {f.cap('torso', TORSO_R):.3f}, "
+                  f"head {f.cap('head', HEAD_R):.3f}, forearm {f.cap('l_forearm'):.3f}, "
+                  f"hand {f.cap('l_hand'):.3f}, shin {f.cap('l_shin'):.3f} m")
+        else:
+            print(f"capsules {f.name}: DEFAULTS (torso {TORSO_R}, head {HEAD_R}, limbs 0) — optimistic; "
+                  f"`python pipeline\\run_in_blender.py skeleton <spec>` measures them on the mesh")
 
     s0 = args.from_src or 1
     s1 = min(args.to_src or n_src, n_src)
@@ -281,9 +301,10 @@ def main() -> None:
                     p0, p1 = att.bone(dfn, b0), att.bone(dfn, b1)
                 except KeyError:
                     continue
+                r = att.cap(lname)
                 row["limbs"][f"{side}:{lname}"] = min(
-                    seg_seg(p0, p1, o_hips, o_neck) - TORSO_R,
-                    seg_dist(o_head, p0, p1) - HEAD_R)
+                    seg_seg(p0, p1, o_hips, o_neck) - other.cap("torso", TORSO_R) - r,
+                    seg_dist(o_head, p0, p1) - other.cap("head", HEAD_R) - r)
         for tag, bone_name in STRIKERS.items():
             rn = REF_STRIKERS[tag]
             for att, dfn, other, dfo, side in ((A, fa, B, fb, "A"), (B, fb, A, fa, "B")):

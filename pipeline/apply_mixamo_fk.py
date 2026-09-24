@@ -731,18 +731,21 @@ def run(spec_path: str) -> dict:
 
 
 def export_skeleton(spec_path: str) -> dict:
-    """Add this character's rest skeleton to its rig profile, so fk_solve.py
-    can solve the clip outside Blender (profiles written by setup_rig.py /
-    setup_duo.py already carry it)."""
+    """Add this character's rest skeleton and mesh-fitted collision capsules
+    to its rig profile — what fk_solve.py and compare_pair.py read — for
+    profiles written before setup_rig.py / setup_duo.py measured them."""
     import fk_solve
+    from setup_rig import measure_capsules
 
     spec = json.loads(rpath(spec_path).read_text(encoding="utf-8"))
     arm = get_armature(spec)
     p = rpath(spec.get("rig_profile", "rig_profile.json"))
     prof = json.loads(p.read_text(encoding="utf-8"))
     prof["skeleton"] = fk_solve.Skeleton.from_blender(arm).to_profile()
+    prof["capsules"] = measure_capsules(arm)
     p.write_text(json.dumps(prof, indent=1), encoding="utf-8")
-    return {"profile": str(p), "bones": len(prof["skeleton"]["bones"])}
+    return {"profile": str(p), "bones": len(prof["skeleton"]["bones"]),
+            "capsules": {k: v["radius"] for k, v in prof["capsules"].items()}}
 
 
 def run_stills_render(spec_path: str, dest_frames) -> dict:

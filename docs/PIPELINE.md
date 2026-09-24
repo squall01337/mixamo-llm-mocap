@@ -562,9 +562,16 @@ The retarget reproduced that 0.111 m to the centimetre and was
 *therefore* wrong.
 
 **Measure it on the meshes.** The capsule proxies in `compare_pair.py`
-are right about separation and reach and optimistic about contact — they
-scored this kick as clearing by 4 mm while the meshes intersected over
-230 face pairs. Ground truth is the evaluated, skinned geometry:
+are right about separation and reach, and were optimistic about contact:
+fixed human-sized radii scored this kick as clearing by 4 mm while the
+meshes intersected over 230 face pairs. Profiles now carry each
+character's own radii, measured on its skinned mesh by `setup_rig.py` /
+`setup_duo.py` (older profiles: `python pipeline\run_in_blender.py
+skeleton <spec>`), and the contact test uses them — limbs, fists and feet
+as capsules against the other character's torso and head. `compare_pair`
+says which fighters run on measured radii and which on defaults. The
+capsules are a fast screen; ground truth is still the evaluated, skinned
+geometry:
 
 ```
 python pipeline\run_in_blender.py contact action_specs\duel_ybot.json ^

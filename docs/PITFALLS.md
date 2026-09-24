@@ -212,7 +212,10 @@ touching a clip a human has partially signed off.
     human says two characters touch and your numbers say otherwise,
     the numbers are measuring the wrong thing. Run
     `run_in_blender.py contact` (BVH overlap on the evaluated, skinned
-    meshes) before believing any clearance.
+    meshes) before believing any clearance. The capsules themselves are no
+    longer guessed: rig profiles carry radii measured on each character's
+    mesh (95th percentile of each part's skin), limbs included — they used
+    to be zero-thickness lines.
 34. **Check the WHOLE clip, not the beat you are working on.** Chasing
     the kick, the mesh check was run over frames 165–205 and reported
     it clean. Run over all 301 it found four more intersections nobody
