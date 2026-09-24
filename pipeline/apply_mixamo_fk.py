@@ -31,12 +31,16 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import bpy
 from mathutils import Quaternion, Vector
 
 REPO = Path(__file__).resolve().parents[1]
+# fk_solve / setup_rig live beside this file; make them importable however
+# this module was loaded (run_in_blender.py, an MCP snippet, a file path).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 GROUND_Z = 0.105      # Y Bot rest ankle height (flat-foot contact)
 HIP_HEIGHT = 0.99792  # Y Bot rest hip height
 BALL_Z = 0.03284      # Y Bot rest ball (ToeBase head) height
