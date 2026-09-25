@@ -150,6 +150,12 @@ fists close, where the clip locks back to rest.
 4. **Iterate** with [docs/PIPELINE.md](docs/PIPELINE.md) and
    [docs/PITFALLS.md](docs/PITFALLS.md).
 
+   A clip signed off before the twist torso and the contact pin became
+   the defaults: `pipeline\ab_test.py --spec action_specs\<name>.json`
+   runs the old and the new lift on it side by side — QA, compare and the
+   beats where they differ — before you re-ship it
+   ([docs/PIPELINE.md](docs/PIPELINE.md) section 12).
+
 ## What you need to bring (and where to get it)
 
 | What | Where | Notes |

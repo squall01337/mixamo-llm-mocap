@@ -746,3 +746,70 @@ the corrector removed. Then lift, apply and run `compare_reference.py`
 sized for come back within tolerance without it, the variant wins on
 that plate. Keep the corrector otherwise. One change per pass, as
 always.
+
+## 12. Old vs new on a clip you already signed off
+
+The twist torso (section 4.1) and the contact pin (section 3) are
+defaults, so every spec picks them up on its next lift — including
+clips signed off before they existed, whose correctors (`reach`,
+`boost`, `smooth`, `arm_follow`, ...) were sized against the single
+torso frame and the support-ankle pin. Nothing proves the new defaults
+are better on a given plate until that plate says so. Before re-shipping
+such a clip, run both on it:
+
+```
+tools\GVHMR\.venv\Scripts\python.exe pipeline\estimate_pose_gvhmr.py --video plates\spin\<clip>.mp4 --out plates\spin\landmarks_v2.json
+tools\GVHMR\.venv\Scripts\python.exe pipeline\ab_test.py --spec action_specs\spin.json --landmarks plates\spin\landmarks_v2.json
+```
+
+The re-estimate goes to a new file, so the landmarks the clip was built
+from stay as they are; it reuses the plate's GVHMR cache and adds the
+`body`, `static` and `visibility` blocks the new modes read. Without
+`--landmarks` both copies read the spec's own file and the new modes run
+without those blocks (the script says so). A two-character clip takes
+both specs, in the same order as their `--landmarks`, and adds
+`compare_pair.py`:
+
+```
+... estimate_pose_gvhmr.py --video plates\duel\duel.mp4 --person left  --out plates\duel\landmarks_grey_v2.json
+... estimate_pose_gvhmr.py --video plates\duel\duel.mp4 --person right --out plates\duel\landmarks_white_v2.json
+... ab_test.py --spec action_specs\duel_ybot.json --spec action_specs\duel_ninja.json --landmarks plates\duel\landmarks_grey_v2.json --landmarks plates\duel\landmarks_white_v2.json
+```
+
+`ab_test.py` copies each spec to `clips/ab/<name>/old/` (`"torso":
+"rigid", "pin": "single"`: the lift the clip was signed off with; those
+modes ignore the new blocks) and `clips/ab/<name>/new/` (the defaults),
+each with its
+own `clip_dir`, `joints_out` and `action_name`. Both keep every corrector
+of the original, so what differs is the pipeline, not the tuning, and
+nothing the original spec produced is touched. It runs lift, solve, QA
+and compare on both — seconds, no Blender (the rig profile needs its
+`skeleton`, section 5) — and prints:
+
+- the QA verdicts, FAIL/WARN counts and the grounded-skate totals side
+  by side, and every QA check whose verdict changed;
+- the `compare_reference.py` windows (and `compare_pair.py` findings) of
+  each;
+- the beats where the two motions differ most, with the `stills`
+  commands that render exactly those frames for each copy.
+
+Then look (section 10): apply both copies (`run_in_blender.py all
+clips/ab/<name>/old/<name>/spec.json`, then the `new` one; each apply
+reports `selfcheck_max_err_m`, which must stay under a millimetre), render
+both showcases, and put them side by side with the source at the listed
+beats.
+
+**Reading it.** The new copy should not add FAIL or WARN lines, should
+not slide more on the floor, and should not open compare windows the old
+one did not have. Where both agree with the video, the look decides.
+Expect the correctors to be the first thing that moves: a `reach` sized
+for strikes that came back short can overshoot once the torso turns into
+the punch, and a window that now over-corrects is re-sized with
+`size_correctors.py` (section 8) — not a reason to keep the old modes for
+the whole clip.
+
+**Deciding.** New wins: point the spec's `landmarks` at the re-estimate
+and run the normal pipeline. Old wins: add `"torso": "rigid"` and/or
+`"pin": "single"` to the spec — one line each, and the lift is back to
+what was signed off. Either way `clips/ab/<name>` can go. One plate at a
+time, the one with the fewest correctors first.
