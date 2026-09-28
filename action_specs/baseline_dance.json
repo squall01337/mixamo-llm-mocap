@@ -1,0 +1,26 @@
+{
+  "name": "baseline_dance",
+  "action_name": "Baseline_Dance",
+  "clip_dir": "clips/baseline_dance",
+  "landmarks": "plates/baseline_dance/landmarks.json",
+  "joints_out": "plates/baseline_dance/joints_mixamo.json",
+  "beatsheet": "plates/baseline_dance/BEATSHEET.md",
+  "estimator": "gvhmr_siga24",
+  "src_fps": 24,
+  "dst_fps": 30,
+
+  "rest_blend_start": { "full_src": 1, "release_src": 24 },
+  "rest_blend_end": { "start_src": 145, "full_src": 157 },
+
+  "fists": { "rise_src": [48, 58], "fall_src": [72, 82] },
+
+  "plant": [
+    { "src": [1, 63], "support": "both" },
+    { "src": [64, 70], "support": "right" },
+    { "src": [71, 87], "support": "both" },
+    { "src": [88, 112], "support": "left" },
+    { "src": [113, 192], "support": "both" }
+  ],
+
+  "qa_src_frames": [1, 22, 31, 49, 61, 67, 79, 91, 97, 109, 121, 145, 157, 175, 192]
+}
